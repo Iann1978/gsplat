@@ -125,3 +125,25 @@ data
 results
 
 !examples/benchmarks/compression/results/
+
+# Server runtime data
+server/train_ply/jobs/
+server/*/logs/
+server/*/checkpoints/
+
+# Image directories (COLMAP datasets)
+**/images/
+**/images_*/
+**/images_*_png/
+
+# Large binary files
+*.ply
+*.PLY
+*.jpg
+*.jpeg
+*.JPG
+*.JPEG
+*.png
+*.PNG
+server/examples/*/images/
+server/examples/*/*.ply
