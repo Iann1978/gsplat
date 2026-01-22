@@ -147,3 +147,5 @@ server/*/checkpoints/
 *.PNG
 server/examples/*/images/
 server/examples/*/*.ply
+server/sam/*
+server/sam3/
