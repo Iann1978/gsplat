@@ -157,6 +157,7 @@ async def start_training(
             try:
                 config_dict = json.loads(config_json)
                 training_config = TrainingConfig(**config_dict)
+                training_config.normalize_world_space = True
             except Exception as e:
                 logger.error(f"POST /train - Invalid training config JSON for job {job_id}: {str(e)}")
                 raise HTTPException(
