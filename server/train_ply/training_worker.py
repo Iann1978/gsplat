@@ -260,6 +260,21 @@ def _create_config_from_request(
         else:
             cfg.strategy = DefaultStrategy(verbose=True)
     
+    # Ensure test_every doesn't result in empty training set
+    # Count images in camera JSON and adjust test_every if needed
+    try:
+        with open(camera_json, "r") as f:
+            camera_data = json.load(f)
+        num_images = len(camera_data)
+        
+        # If test_every >= num_images, all images would go to validation
+        # Set test_every to num_images + 1 to ensure at least one image goes to training
+        if cfg.test_every >= num_images:
+            cfg.test_every = num_images + 1
+    except Exception:
+        # If we can't read the camera JSON, let it fail later with a clearer error
+        pass
+    
     # Apply steps scaler
     cfg.adjust_steps(cfg.steps_scaler)
     
