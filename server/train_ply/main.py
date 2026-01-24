@@ -3,6 +3,7 @@
 import asyncio
 import io
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -17,6 +18,29 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from .job_manager import JobManager
 from .models import HealthResponse, JobInfo, JobStatus, TrainResponse, TrainingConfig, UploadStatusResponse
 from .training_worker import run_training_job
+
+# Configure logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+# Create logs directory
+_log_dir = Path(__file__).parent / "logs"
+_log_dir.mkdir(parents=True, exist_ok=True)
+
+# Configure file handler for API logs
+_log_file = _log_dir / "api.log"
+_file_handler = logging.FileHandler(_log_file, mode='a', encoding='utf-8')
+_file_handler.setLevel(logging.DEBUG)
+
+# Configure log format
+_log_format = logging.Formatter(
+    '%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+_file_handler.setFormatter(_log_format)
+
+# Add file handler to logger
+logger.addHandler(_file_handler)
 
 # Configuration from environment variables
 JOBS_DIR = os.getenv("TRAIN_PLY_JOBS_DIR", None)
@@ -57,9 +81,13 @@ async def start_training(
     Returns:
         TrainResponse with job_id and status
     """
+    logger.info(f"POST /train - Received training request: {len(images)} images, config={'provided' if config_json else 'not provided'}")
+    logger.debug(f"POST /train - Training config: {config_json}")
+    
     # Check concurrent job limit
     active_count = job_manager.get_active_jobs_count()
     if active_count >= MAX_CONCURRENT_JOBS:
+        logger.warning(f"POST /train - Maximum concurrent jobs ({MAX_CONCURRENT_JOBS}) reached")
         raise HTTPException(
             status_code=503,
             detail=f"Maximum concurrent jobs ({MAX_CONCURRENT_JOBS}) reached. Please wait for a job to complete.",
@@ -67,9 +95,11 @@ async def start_training(
     
     # Create job
     job_id = job_manager.create_job()
+    logger.info(f"POST /train - Created job: {job_id}")
     job_dir = job_manager.get_job_dir(job_id)
     
     if job_dir is None:
+        logger.error(f"POST /train - Failed to create job directory for job: {job_id}")
         raise HTTPException(status_code=500, detail="Failed to create job directory")
     
     try:
@@ -96,6 +126,7 @@ async def start_training(
                 content = await f.read()
                 camera_data = json.loads(content)
         except json.JSONDecodeError as e:
+            logger.error(f"POST /train - Invalid camera JSON for job {job_id}: {str(e)}")
             raise HTTPException(status_code=400, detail=f"Invalid camera JSON: {str(e)}")
         
         # Save images
@@ -114,6 +145,7 @@ async def start_training(
         
         if not camera_image_names.issubset(uploaded_image_names):
             missing = camera_image_names - uploaded_image_names
+            logger.error(f"POST /train - Missing images for job {job_id}: {missing}")
             raise HTTPException(
                 status_code=400,
                 detail=f"Missing images referenced in camera JSON: {missing}",
@@ -126,6 +158,7 @@ async def start_training(
                 config_dict = json.loads(config_json)
                 training_config = TrainingConfig(**config_dict)
             except Exception as e:
+                logger.error(f"POST /train - Invalid training config JSON for job {job_id}: {str(e)}")
                 raise HTTPException(
                     status_code=400,
                     detail=f"Invalid training config JSON: {str(e)}",
@@ -152,6 +185,7 @@ async def start_training(
         
         task.add_done_callback(lambda _: cleanup_task(job_id))
         
+        logger.info(f"POST /train - Training job {job_id} started successfully")
         return TrainResponse(
             job_id=job_id,
             status=JobStatus.PENDING,
@@ -162,6 +196,7 @@ async def start_training(
         raise
     except Exception as e:
         # Clean up on error
+        logger.error(f"POST /train - Failed to start training for job {job_id}: {str(e)}")
         job_manager.update_job_status(
             job_id,
             JobStatus.FAILED,
@@ -180,10 +215,13 @@ async def get_job_status(job_id: str) -> JobInfo:
     Returns:
         JobInfo with current status and progress
     """
+    logger.info(f"GET /train/{job_id}/status - Job status requested")
     job = job_manager.get_job(job_id)
     if job is None:
+        logger.error(f"GET /train/{job_id}/status - Job not found: {job_id}")
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     
+    logger.info(f"GET /train/{job_id}/status - Returning status: {job.status}")
     return job
 
 
@@ -198,21 +236,26 @@ async def get_job_results(job_id: str, file_type: Optional[str] = None) -> FileR
     Returns:
         Zip file with results or individual file
     """
+    logger.info(f"GET /train/{job_id}/results - Results requested (file_type: {file_type or 'all'})")
     job = job_manager.get_job(job_id)
     if job is None:
+        logger.error(f"GET /train/{job_id}/results - Job not found: {job_id}")
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     
     if job.status != JobStatus.COMPLETED:
+        logger.warning(f"GET /train/{job_id}/results - Job not completed (status: {job.status})")
         raise HTTPException(
             status_code=400,
             detail=f"Job {job_id} is not completed (status: {job.status})",
         )
     
     if job.result_dir is None:
+        logger.error(f"GET /train/{job_id}/results - Results not found for job: {job_id}")
         raise HTTPException(status_code=404, detail="Results not found")
     
     result_dir = Path(job.result_dir)
     if not result_dir.exists():
+        logger.error(f"GET /train/{job_id}/results - Result directory does not exist: {result_dir}")
         raise HTTPException(status_code=404, detail="Result directory does not exist")
     
     # If file_type is specified, return individual file or directory
@@ -222,21 +265,25 @@ async def get_job_results(job_id: str, file_type: Optional[str] = None) -> FileR
             if ply_dir.exists() and any(ply_dir.glob("*.ply")):
                 # Return first PLY file or create zip of all
                 ply_files = list(ply_dir.glob("*.ply"))
+                logger.info(f"GET /train/{job_id}/results - Returning {len(ply_files)} PLY file(s)")
                 if len(ply_files) == 1:
                     return FileResponse(ply_files[0], media_type="application/octet-stream")
                 else:
                     # Create zip of all PLY files
                     return _create_zip_response(ply_files, f"{job_id}_ply.zip")
+            logger.error(f"GET /train/{job_id}/results - No PLY files found")
             raise HTTPException(status_code=404, detail="No PLY files found")
         
         elif file_type == "checkpoint":
             ckpt_dir = result_dir / "ckpts"
             if ckpt_dir.exists() and any(ckpt_dir.glob("*.pt")):
                 ckpt_files = list(ckpt_dir.glob("*.pt"))
+                logger.info(f"GET /train/{job_id}/results - Returning {len(ckpt_files)} checkpoint file(s)")
                 if len(ckpt_files) == 1:
                     return FileResponse(ckpt_files[0], media_type="application/octet-stream")
                 else:
                     return _create_zip_response(ckpt_files, f"{job_id}_checkpoints.zip")
+            logger.error(f"GET /train/{job_id}/results - No checkpoint files found")
             raise HTTPException(status_code=404, detail="No checkpoint files found")
         
         elif file_type == "render":
@@ -244,7 +291,9 @@ async def get_job_results(job_id: str, file_type: Optional[str] = None) -> FileR
             if render_dir.exists():
                 render_files = list(render_dir.glob("*.png"))
                 if render_files:
+                    logger.info(f"GET /train/{job_id}/results - Returning {len(render_files)} render file(s)")
                     return _create_zip_response(render_files, f"{job_id}_renders.zip")
+            logger.error(f"GET /train/{job_id}/results - No render files found")
             raise HTTPException(status_code=404, detail="No render files found")
         
         elif file_type == "stats":
@@ -252,10 +301,13 @@ async def get_job_results(job_id: str, file_type: Optional[str] = None) -> FileR
             if stats_dir.exists():
                 stats_files = list(stats_dir.glob("*.json"))
                 if stats_files:
+                    logger.info(f"GET /train/{job_id}/results - Returning {len(stats_files)} stats file(s)")
                     return _create_zip_response(stats_files, f"{job_id}_stats.zip")
+            logger.error(f"GET /train/{job_id}/results - No stats files found")
             raise HTTPException(status_code=404, detail="No stats files found")
     
     # Default: create zip of all results
+    logger.info(f"GET /train/{job_id}/results - Returning all results as zip")
     return _create_results_zip(job_id, result_dir)
 
 
@@ -269,12 +321,15 @@ async def get_job_logs(job_id: str) -> StreamingResponse:
     Returns:
         Text log content
     """
+    logger.info(f"GET /train/{job_id}/logs - Logs requested")
     job = job_manager.get_job(job_id)
     if job is None:
+        logger.error(f"GET /train/{job_id}/logs - Job not found: {job_id}")
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     
     job_dir = job_manager.get_job_dir(job_id)
     if job_dir is None:
+        logger.error(f"GET /train/{job_id}/logs - Job directory not found: {job_id}")
         raise HTTPException(status_code=404, detail="Job directory not found")
     
     log_file = job_dir / "logs" / "training.log"
@@ -282,13 +337,16 @@ async def get_job_logs(job_id: str) -> StreamingResponse:
         # Return error log if available
         error_log = job_dir / "logs" / "error.log"
         if error_log.exists():
+            logger.info(f"GET /train/{job_id}/logs - Returning error log")
             async def read_error_log():
                 async with aiofiles.open(error_log, "r") as f:
                     content = await f.read()
                     yield content
             return StreamingResponse(read_error_log(), media_type="text/plain")
+        logger.error(f"GET /train/{job_id}/logs - Log file not found")
         raise HTTPException(status_code=404, detail="Log file not found")
     
+    logger.info(f"GET /train/{job_id}/logs - Returning training log")
     async def read_log():
         async with aiofiles.open(log_file, "r") as f:
             async for line in f:
@@ -307,11 +365,14 @@ async def cancel_job(job_id: str) -> JSONResponse:
     Returns:
         JSON response with cancellation status
     """
+    logger.info(f"DELETE /train/{job_id} - Cancellation requested")
     job = job_manager.get_job(job_id)
     if job is None:
+        logger.error(f"DELETE /train/{job_id} - Job not found: {job_id}")
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     
     if job.status not in [JobStatus.PENDING, JobStatus.RUNNING]:
+        logger.warning(f"DELETE /train/{job_id} - Job cannot be cancelled (status: {job.status})")
         raise HTTPException(
             status_code=400,
             detail=f"Job {job_id} cannot be cancelled (status: {job.status})",
@@ -322,16 +383,19 @@ async def cancel_job(job_id: str) -> JSONResponse:
         task = _active_tasks[job_id]
         task.cancel()
         del _active_tasks[job_id]
+        logger.info(f"DELETE /train/{job_id} - Cancelled active task")
     
     # Update job status
     success = job_manager.cancel_job(job_id)
     
     if success:
+        logger.info(f"DELETE /train/{job_id} - Job cancelled successfully")
         return JSONResponse(
             content={"message": f"Job {job_id} cancelled successfully"},
             status_code=200,
         )
     else:
+        logger.error(f"DELETE /train/{job_id} - Failed to cancel job")
         raise HTTPException(status_code=500, detail="Failed to cancel job")
 
 
@@ -703,6 +767,8 @@ async def health_check() -> HealthResponse:
     """
     active_jobs = job_manager.get_active_jobs_count()
     total_jobs = len(job_manager.list_jobs())
+    
+    logger.info(f"GET /health - Health check: {active_jobs} active jobs, {total_jobs} total jobs")
     
     return HealthResponse(
         status="healthy",
