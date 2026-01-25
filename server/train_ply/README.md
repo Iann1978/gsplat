@@ -293,9 +293,8 @@ Upload camera.json file to a job.
 ```json
 {
   "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "ready",
-  "cameras_uploaded": true,
-  "validation_errors": []
+  "status": "uploading",
+  "cameras_uploaded": true
 }
 ```
 
@@ -305,7 +304,7 @@ curl -X POST "http://localhost:8000/train/{job_id}/cameras" \
   -F "cameras_json=@path/to/cameras.json"
 ```
 
-**Note:** The camera JSON is validated immediately. If images don't match camera keys, validation errors will be returned.
+**Note:** Validation is not performed automatically. Use the `/validate` endpoint to check if the job is ready after uploading all files.
 
 ### POST /train/{job_id}/config
 
@@ -335,7 +334,7 @@ curl -X POST "http://localhost:8000/train/{job_id}/config" \
 
 ### GET /train/{job_id}/upload-status
 
-Get upload status and validation status for a job.
+Get upload status for a job. Returns the current status without running validation.
 
 **Request:**
 - Method: `GET`
@@ -345,13 +344,13 @@ Get upload status and validation status for a job.
 ```json
 {
   "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "ready",
+  "status": "uploading",
   "ply_uploaded": true,
   "cameras_uploaded": true,
   "images_uploaded": ["image1.jpg", "image2.jpg"],
   "config_uploaded": false,
   "validation_errors": [],
-  "is_ready": true
+  "is_ready": false
 }
 ```
 
@@ -359,6 +358,49 @@ Get upload status and validation status for a job.
 ```bash
 curl "http://localhost:8000/train/{job_id}/upload-status"
 ```
+
+**Note:** This endpoint does NOT run validation automatically. The `is_ready` field reflects the current job status (true if status is "ready", false otherwise). Use the `/validate` endpoint to manually validate the job.
+
+### POST /train/{job_id}/validate
+
+Manually validate a job to check if it's ready to start training. This endpoint validates that all required files are present and match correctly.
+
+**Request:**
+- Method: `POST`
+- Path: `/train/{job_id}/validate`
+
+**Response:**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "ready",
+  "is_ready": true,
+  "validation_errors": []
+}
+```
+
+**Error Response (if validation fails):**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "uploading",
+  "is_ready": false,
+  "validation_errors": [
+    "Missing images referenced in camera JSON: {'image3.jpg'}"
+  ]
+}
+```
+
+**Example:**
+```bash
+curl -X POST "http://localhost:8000/train/{job_id}/validate"
+```
+
+**Note:** 
+- Only jobs in `uploading` or `ready` state can be validated
+- If validation passes, the job status changes to `ready`
+- If validation fails, the job status remains `uploading` and errors are returned
+- You can call this endpoint multiple times to re-validate after uploading additional files
 
 ### POST /train/{job_id}/start
 
@@ -453,14 +495,21 @@ with open("path/to/cameras.json", "rb") as f:
     )
 print("Cameras uploaded")
 
-# Step 5: Check upload status
+# Step 5: Manually validate the job
+response = requests.post(f"{BASE_URL}/train/{job_id}/validate")
+validation = response.json()
+print(f"Validation: Ready={validation['is_ready']}, Status={validation['status']}")
+if validation['validation_errors']:
+    print(f"Validation errors: {validation['validation_errors']}")
+    # If there are errors, you may need to upload more images or fix the camera JSON
+    # Then call validate again
+
+# Step 6: Check upload status (optional, for checking current state)
 response = requests.get(f"{BASE_URL}/train/{job_id}/upload-status")
 status = response.json()
-print(f"Status: {status['status']}, Ready: {status['is_ready']}")
-if status['validation_errors']:
-    print(f"Validation errors: {status['validation_errors']}")
+print(f"Current status: {status['status']}")
 
-# Step 6: Upload config (optional)
+# Step 7: Upload config (optional)
 config = {
     "max_steps": 30000,
     "batch_size": 1,
@@ -472,11 +521,11 @@ response = requests.post(
 )
 print("Config uploaded")
 
-# Step 7: Start training
+# Step 8: Start training (validates one more time before starting)
 response = requests.post(f"{BASE_URL}/train/{job_id}/start")
 print("Training started!")
 
-# Step 8: Monitor training (same as bulk upload)
+# Step 9: Monitor training (same as bulk upload)
 while True:
     response = requests.get(f"{BASE_URL}/train/{job_id}/status")
     status = response.json()

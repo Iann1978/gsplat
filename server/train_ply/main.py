@@ -16,7 +16,7 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadF
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from .job_manager import JobManager
-from .models import HealthResponse, JobInfo, JobStatus, TrainResponse, TrainingConfig, UploadStatusResponse
+from .models import HealthResponse, JobInfo, JobStatus, TrainResponse, TrainingConfig, UploadStatusResponse, ValidateResponse
 from .training_worker import run_training_job
 
 # Configure logger
@@ -539,7 +539,7 @@ async def upload_cameras(job_id: str, cameras_json: UploadFile = File(..., descr
         cameras_json: Camera JSON file upload
         
     Returns:
-        JSON response with upload status and validation errors
+        JSON response with upload status (validation must be done manually via /validate endpoint)
     """
     job = job_manager.get_job(job_id)
     if job is None:
@@ -566,9 +566,6 @@ async def upload_cameras(job_id: str, cameras_json: UploadFile = File(..., descr
         if not success:
             raise HTTPException(status_code=400, detail="Invalid camera JSON format")
         
-        # Validate job readiness (check image matching)
-        is_ready, errors = job_manager.validate_job_ready(job_id)
-        
         # Refresh job to get updated status
         job = job_manager.get_job(job_id)
         
@@ -577,7 +574,6 @@ async def upload_cameras(job_id: str, cameras_json: UploadFile = File(..., descr
                 "job_id": job_id,
                 "status": job.status,
                 "cameras_uploaded": True,
-                "validation_errors": errors,
             },
             status_code=200,
         )
@@ -642,13 +638,48 @@ async def get_upload_status(job_id: str) -> UploadStatusResponse:
         job_id: Job identifier
         
     Returns:
-        UploadStatusResponse with upload progress and validation status
+        UploadStatusResponse with upload progress and last validation status
     """
     status_dict = job_manager.get_upload_status(job_id)
     if status_dict is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     
     return UploadStatusResponse(**status_dict)
+
+
+@app.post("/train/{job_id}/validate", response_model=ValidateResponse)
+async def validate_job(job_id: str) -> ValidateResponse:
+    """Manually validate a job to check if it's ready to start training.
+    
+    Args:
+        job_id: Job identifier
+        
+    Returns:
+        ValidateResponse with validation results and updated status
+    """
+    job = job_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    
+    # Only allow validation for jobs in UPLOADING or READY state
+    if job.status not in [JobStatus.UPLOADING, JobStatus.READY]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job {job_id} cannot be validated in current state (current: {job.status})",
+        )
+    
+    # Run validation
+    is_ready, errors = job_manager.validate_job_ready(job_id)
+    
+    # Refresh job to get updated status
+    job = job_manager.get_job(job_id)
+    
+    return ValidateResponse(
+        job_id=job_id,
+        status=job.status,
+        is_ready=is_ready,
+        validation_errors=errors,
+    )
 
 
 @app.post("/train/{job_id}/start", response_model=TrainResponse)

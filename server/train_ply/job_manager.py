@@ -426,7 +426,13 @@ class JobManager:
         
         is_ready = len(errors) == 0
         if is_ready:
-            job.status = JobStatus.READY
+            # Set status to READY if validation passes (only if currently UPLOADING or READY)
+            if job.status in [JobStatus.UPLOADING, JobStatus.READY]:
+                job.status = JobStatus.READY
+        else:
+            # Reset status to UPLOADING if validation fails (allows re-uploading)
+            if job.status == JobStatus.READY:
+                job.status = JobStatus.UPLOADING
         
         return is_ready, errors
     
@@ -438,13 +444,15 @@ class JobManager:
             
         Returns:
             Dict with upload status, or None if job not found
+            Note: This does NOT run validation automatically. Use validate_job_ready() separately.
         """
         job = self._jobs.get(job_id)
         if job is None:
             return None
         
-        # Validate if ready
-        is_ready, _ = self.validate_job_ready(job_id)
+        # Return current status without auto-validation
+        # is_ready reflects the current job status (READY if previously validated successfully)
+        is_ready = job.status == JobStatus.READY
         
         return {
             "job_id": job_id,

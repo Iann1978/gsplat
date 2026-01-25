@@ -150,3 +150,11 @@ class UploadStatusResponse(BaseModel):
     config_uploaded: bool = Field(..., description="Whether training config is uploaded")
     validation_errors: List[str] = Field(..., description="List of validation errors")
     is_ready: bool = Field(..., description="Whether job is ready to start training")
+
+
+class ValidateResponse(BaseModel):
+    """Response for manual validation."""
+    job_id: str = Field(..., description="Job identifier")
+    status: JobStatus = Field(..., description="Current job status after validation")
+    is_ready: bool = Field(..., description="Whether job is ready to start training")
+    validation_errors: List[str] = Field(..., description="List of validation errors")
