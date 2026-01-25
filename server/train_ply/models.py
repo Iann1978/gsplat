@@ -127,7 +127,7 @@ class JobInfo(BaseModel):
     
     # Upload tracking
     ply_uploaded: bool = Field(default=False, description="Whether PLY file is uploaded")
-    cameras_uploaded: bool = Field(default=False, description="Whether camera.json is uploaded")
+    cameras_uploaded: List[str] = Field(default_factory=list, description="List of uploaded camera filenames")
     images_uploaded: List[str] = Field(default_factory=list, description="List of uploaded image filenames")
     config_uploaded: bool = Field(default=False, description="Whether training config is uploaded")
     validation_errors: List[str] = Field(default_factory=list, description="List of validation errors")
@@ -145,7 +145,7 @@ class UploadStatusResponse(BaseModel):
     job_id: str = Field(..., description="Job identifier")
     status: JobStatus = Field(..., description="Current job status")
     ply_uploaded: bool = Field(..., description="Whether PLY file is uploaded")
-    cameras_uploaded: bool = Field(..., description="Whether camera.json is uploaded")
+    cameras_uploaded: List[str] = Field(..., description="List of uploaded camera filenames")
     images_uploaded: List[str] = Field(..., description="List of uploaded image filenames")
     config_uploaded: bool = Field(..., description="Whether training config is uploaded")
     validation_errors: List[str] = Field(..., description="List of validation errors")

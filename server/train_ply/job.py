@@ -136,30 +136,42 @@ class Job:
         
         return True
     
-    def upload_cameras(self, file_path: Path) -> bool:
-        """Upload camera.json file to job.
+    def upload_camera(self, filename: str, file_path: Path) -> bool:
+        """Upload a camera file to job.
         
         Args:
-            file_path: Path to camera.json file to save
+            filename: Name of the camera file
+            file_path: Path to camera file to save
             
         Returns:
-            True if successful, False if invalid JSON or job directory doesn't exist
+            True if successful, False if duplicate, invalid JSON, or job directory doesn't exist
         """
         if not self._job_dir.exists():
             return False
         
+        # Check for duplicates
+        if filename in self._info.cameras_uploaded:
+            return False  # Duplicate upload
+        
         # Validate JSON format
         try:
             with open(file_path, "r") as f:
-                json.load(f)
+                camera_data = json.load(f)
+                # Each .cam.json file should contain a single camera entry
+                if not isinstance(camera_data, dict) or len(camera_data) == 0:
+                    return False
         except (json.JSONDecodeError, IOError):
             return False
         
+        # Create cameras directory if it doesn't exist
+        cameras_dir = self._job_dir / "input" / "cameras"
+        cameras_dir.mkdir(parents=True, exist_ok=True)
+        
         # Copy file to job directory
-        target_path = self._job_dir / "input" / "cameras.json"
+        target_path = cameras_dir / filename
         shutil.copy2(file_path, target_path)
         
-        self._info.cameras_uploaded = True
+        self._info.cameras_uploaded.append(filename)
         self._info.updated_at = datetime.now()
         
         return True
@@ -190,45 +202,62 @@ class Job:
             if not ply_path.exists():
                 errors.append("PLY file missing from disk")
         
-        # Check camera.json
+        # Check cameras directory
         if not self._info.cameras_uploaded:
-            errors.append("Camera JSON not uploaded")
+            errors.append("No camera files uploaded")
         else:
-            cameras_path = self._job_dir / "input" / "cameras.json"
-            if not cameras_path.exists():
-                errors.append("Camera JSON missing from disk")
+            cameras_dir = self._job_dir / "input" / "cameras"
+            if not cameras_dir.exists() or not cameras_dir.is_dir():
+                errors.append("Cameras directory missing from disk")
             else:
-                # Validate camera JSON and check image matching
-                try:
-                    with open(cameras_path, "r") as f:
-                        camera_data = json.load(f)
-                    
-                    if not isinstance(camera_data, dict):
-                        errors.append("Camera JSON is not a valid object")
+                # Load and merge all camera files
+                camera_data = {}
+                missing_files = []
+                invalid_files = []
+                
+                for camera_filename in self._info.cameras_uploaded:
+                    camera_path = cameras_dir / camera_filename
+                    if not camera_path.exists():
+                        missing_files.append(camera_filename)
                     else:
-                        camera_image_names = set(camera_data.keys())
-                        uploaded_image_names = set(self._info.images_uploaded)
-                        
-                        # Check if all camera keys have corresponding images
-                        missing_images = camera_image_names - uploaded_image_names
-                        if missing_images:
-                            errors.append(f"Missing images referenced in camera JSON: {missing_images}")
-                        
-                        # Check if we have at least one image
-                        if not self._info.images_uploaded:
-                            errors.append("No images uploaded")
-                        else:
-                            # Verify all uploaded images exist on disk
-                            images_dir = self._job_dir / "input" / "images"
-                            missing_files = []
-                            for img_name in self._info.images_uploaded:
-                                img_path = images_dir / img_name
-                                if not img_path.exists():
-                                    missing_files.append(img_name)
-                            if missing_files:
-                                errors.append(f"Image files missing from disk: {missing_files}")
-                except (json.JSONDecodeError, IOError) as e:
-                    errors.append(f"Invalid camera JSON: {str(e)}")
+                        try:
+                            with open(camera_path, "r") as f:
+                                file_data = json.load(f)
+                                if isinstance(file_data, dict):
+                                    camera_data.update(file_data)
+                                else:
+                                    invalid_files.append(f"{camera_filename} (not a valid object)")
+                        except (json.JSONDecodeError, IOError) as e:
+                            invalid_files.append(f"{camera_filename} ({str(e)})")
+                
+                if missing_files:
+                    errors.append(f"Camera files missing from disk: {missing_files}")
+                
+                if invalid_files:
+                    errors.append(f"Invalid camera files: {invalid_files}")
+                
+                if camera_data:
+                    camera_image_names = set(camera_data.keys())
+                    uploaded_image_names = set(self._info.images_uploaded)
+                    
+                    # Check if all camera keys have corresponding images
+                    missing_images = camera_image_names - uploaded_image_names
+                    if missing_images:
+                        errors.append(f"Missing images referenced in camera files: {missing_images}")
+                
+                # Check if we have at least one image
+                if not self._info.images_uploaded:
+                    errors.append("No images uploaded")
+                else:
+                    # Verify all uploaded images exist on disk
+                    images_dir = self._job_dir / "input" / "images"
+                    missing_image_files = []
+                    for img_name in self._info.images_uploaded:
+                        img_path = images_dir / img_name
+                        if not img_path.exists():
+                            missing_image_files.append(img_name)
+                    if missing_image_files:
+                        errors.append(f"Image files missing from disk: {missing_image_files}")
         
         # Update validation errors in job
         self._info.validation_errors = errors

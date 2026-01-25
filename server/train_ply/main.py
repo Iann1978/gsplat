@@ -455,17 +455,17 @@ async def upload_images(job_id: str, images: List[UploadFile] = File(..., descri
 
 
 @app.post("/jobs/{job_id}/cameras")
-async def upload_cameras(job_id: str, cameras_json: UploadFile = File(..., description="Camera JSON file")) -> JSONResponse:
-    """Upload camera.json file to a job.
+async def upload_cameras(job_id: str, cameras: List[UploadFile] = File(..., description="Camera files")) -> JSONResponse:
+    """Upload one or more camera files to a job.
     
     Args:
         job_id: Job identifier
-        cameras_json: Camera JSON file upload
+        cameras: List of camera file uploads (.cam.json files)
         
     Returns:
         JSON response with upload status
     """
-    logger.info(f"POST /jobs/{job_id}/cameras - Camera JSON upload requested")
+    logger.info(f"POST /jobs/{job_id}/cameras - Camera file upload requested ({len(cameras)} files)")
     job = job_manager.get_job(job_id)
     if job is None:
         logger.error(f"POST /jobs/{job_id}/cameras - Job not found: {job_id}")
@@ -483,35 +483,67 @@ async def upload_cameras(job_id: str, cameras_json: UploadFile = File(..., descr
         logger.error(f"POST /jobs/{job_id}/cameras - Job directory not found")
         raise HTTPException(status_code=500, detail="Job directory not found")
     
-    # Save camera JSON file temporarily
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode="wb") as tmp_file:
-        content = await cameras_json.read()
-        tmp_file.write(content)
-        tmp_path = Path(tmp_file.name)
+    uploaded_cameras = []
+    failed_cameras = []
     
-    try:
-        job_obj = job_manager._get_job_object(job_id)
-        success = job_obj.upload_cameras(tmp_path) if job_obj else False
-        if not success:
-            logger.error(f"POST /jobs/{job_id}/cameras - Invalid camera JSON format")
-            raise HTTPException(status_code=400, detail="Invalid camera JSON format")
+    # Process each camera file
+    for camera_file in cameras:
+        if not camera_file.filename:
+            logger.warning(f"POST /jobs/{job_id}/cameras - Skipping camera file without filename")
+            continue
         
-        # Refresh job to get updated status
-        job = job_manager.get_job(job_id)
-        logger.info(f"POST /jobs/{job_id}/cameras - Camera JSON uploaded successfully")
+        # Check for duplicates
+        if camera_file.filename in job.cameras_uploaded:
+            logger.warning(f"POST /jobs/{job_id}/cameras - Camera file {camera_file.filename} already uploaded")
+            failed_cameras.append(f"{camera_file.filename} (already uploaded)")
+            continue
         
-        return JSONResponse(
-            content={
-                "job_id": job_id,
-                "status": job.status,
-                "cameras_uploaded": True,
-            },
-            status_code=200,
+        # Save camera file temporarily
+        ext = Path(camera_file.filename).suffix
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext, mode="wb") as tmp_file:
+            content = await camera_file.read()
+            tmp_file.write(content)
+            tmp_path = Path(tmp_file.name)
+        
+        try:
+            job_obj = job_manager._get_job_object(job_id)
+            success = job_obj.upload_camera(camera_file.filename, tmp_path) if job_obj else False
+            if success:
+                uploaded_cameras.append(camera_file.filename)
+            else:
+                failed_cameras.append(f"{camera_file.filename} (upload failed or invalid format)")
+        finally:
+            # Clean up temp file
+            if tmp_path.exists():
+                tmp_path.unlink()
+    
+    if failed_cameras and not uploaded_cameras:
+        # All uploads failed
+        logger.error(f"POST /jobs/{job_id}/cameras - All camera file uploads failed")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to upload camera files: {', '.join(failed_cameras)}",
         )
-    finally:
-        # Clean up temp file
-        if tmp_path.exists():
-            tmp_path.unlink()
+    
+    # Refresh job to get updated cameras list
+    job = job_manager.get_job(job_id)
+    
+    response_content = {
+        "job_id": job_id,
+        "status": job.status,
+        "cameras_uploaded": job.cameras_uploaded.copy(),
+    }
+    
+    if failed_cameras:
+        response_content["failed_cameras"] = failed_cameras
+        logger.warning(f"POST /jobs/{job_id}/cameras - Some camera files failed to upload: {failed_cameras}")
+    
+    logger.info(f"POST /jobs/{job_id}/cameras - Uploaded {len(uploaded_cameras)} camera file(s) successfully")
+    
+    return JSONResponse(
+        content=response_content,
+        status_code=200,
+    )
 
 
 @app.post("/jobs/{job_id}/config")
@@ -629,7 +661,7 @@ async def start_training_from_upload(job_id: str) -> TrainResponse:
     
     # Get paths
     ply_path = job_dir / "input" / "model.ply"
-    camera_json_path = job_dir / "input" / "cameras.json"
+    camera_dir = job_dir / "input" / "cameras"
     input_dir = job_dir / "input"
     
     # Get training config
@@ -642,7 +674,7 @@ async def start_training_from_upload(job_id: str) -> TrainResponse:
             job_id=job_id,
             job_manager=job_manager,
             ply_file_path=str(ply_path),
-            camera_json_path=str(camera_json_path),
+            camera_dir=str(camera_dir),
             data_dir=str(input_dir),
             training_config=training_config,
             result_base_dir=RESULT_BASE_DIR,

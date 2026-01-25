@@ -101,32 +101,35 @@ Upload one or more image files to a job.
 
 #### POST `/jobs/{job_id}/cameras`
 
-Upload camera.json file to a job.
+Upload one or more camera files to a job.
 
 **Request:**
 - Method: `POST`
 - Path Parameters:
   - `job_id` (string) - Job identifier
 - Body: `multipart/form-data`
-  - `cameras_json` (file, required) - Camera JSON file
+  - `cameras` (file[], required) - One or more camera files (.cam.json files)
 
 **Response:**
 ```json
 {
   "job_id": "uuid-string",
   "status": "uploading",
-  "cameras_uploaded": true
+  "cameras_uploaded": ["DSC00153.cam.json", "DSC00154.cam.json", ...]
 }
 ```
 
 **Status Codes:**
-- `200 OK` - Camera JSON uploaded successfully
+- `200 OK` - Camera file(s) uploaded successfully
 - `404 Not Found` - Job not found
-- `400 Bad Request` - Job is not in UPLOADING state or invalid JSON format
+- `400 Bad Request` - Job is not in UPLOADING state, invalid JSON format, or all uploads failed
 
 **Notes:**
-- Validates JSON format on upload
-- Camera JSON keys should match uploaded image filenames
+- Can be called multiple times to upload additional camera files
+- Duplicate filenames are rejected
+- Validates JSON format on upload for each file
+- Each `.cam.json` file should contain a single camera entry: `{"IMAGE_NAME.JPG": {...}}`
+- Camera file keys should match uploaded image filenames
 
 ---
 
@@ -193,7 +196,7 @@ Get comprehensive job status and information.
     ...
   },
   "ply_uploaded": true,
-  "cameras_uploaded": true,
+  "cameras_uploaded": ["DSC00153.cam.json", "DSC00154.cam.json"],
   "images_uploaded": ["image1.jpg", "image2.jpg"],
   "config_uploaded": true,
   "validation_errors": []
@@ -438,7 +441,7 @@ See `models.py` for complete TrainingConfig schema. Key parameters:
    ```
    POST /jobs/{job_id}/ply
    POST /jobs/{job_id}/images
-   POST /jobs/{job_id}/cameras
+   POST /jobs/{job_id}/cameras  (can upload multiple .cam.json files)
    POST /jobs/{job_id}/config  (optional)
    ```
 

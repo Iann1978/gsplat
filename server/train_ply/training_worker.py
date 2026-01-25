@@ -28,7 +28,7 @@ async def run_training_job(
     job_id: str,
     job_manager: JobManager,
     ply_file_path: str,
-    camera_json_path: str,
+    camera_dir: str,
     data_dir: str,
     training_config: Optional[TrainingConfig] = None,
     result_base_dir: Optional[str] = None,
@@ -39,7 +39,7 @@ async def run_training_job(
         job_id: Job identifier
         job_manager: JobManager instance
         ply_file_path: Path to PLY file
-        camera_json_path: Path to camera JSON file
+        camera_dir: Path to cameras directory containing .cam.json files
         data_dir: Directory containing images folder (parent of images/)
         training_config: Optional training configuration
         result_base_dir: Base directory for results
@@ -65,7 +65,7 @@ async def run_training_job(
         # Create training config from request
         cfg = _create_config_from_request(
             ply_path=ply_file_path,
-            camera_json=camera_json_path,
+            camera_dir=camera_dir,
             data_dir=data_dir,
             result_dir=str(result_dir),
             training_config=training_config,
@@ -180,7 +180,7 @@ def _run_training_sync(
 
 def _create_config_from_request(
     ply_path: str,
-    camera_json: str,
+    camera_dir: str,
     data_dir: str,
     result_dir: str,
     training_config: Optional[TrainingConfig] = None,
@@ -189,7 +189,7 @@ def _create_config_from_request(
     
     Args:
         ply_path: Path to PLY file
-        camera_json: Path to camera JSON file
+        camera_dir: Path to cameras directory containing .cam.json files
         data_dir: Directory containing images
         result_dir: Directory for results
         training_config: Optional training configuration
@@ -200,7 +200,7 @@ def _create_config_from_request(
     # Start with default config
     cfg = Config(
         ply_path=ply_path,
-        camera_json=camera_json,
+        camera_dir=camera_dir,
         data_dir=data_dir,
         result_dir=result_dir,
         disable_viewer=True,
@@ -259,18 +259,18 @@ def _create_config_from_request(
             cfg.strategy = DefaultStrategy(verbose=True)
     
     # Ensure test_every doesn't result in empty training set
-    # Count images in camera JSON and adjust test_every if needed
+    # Count .cam.json files in cameras directory and adjust test_every if needed
     try:
-        with open(camera_json, "r") as f:
-            camera_data = json.load(f)
-        num_images = len(camera_data)
+        import glob
+        camera_files = glob.glob(os.path.join(camera_dir, "*.cam.json"))
+        num_images = len(camera_files)
         
         # If test_every >= num_images, all images would go to validation
         # Set test_every to num_images + 1 to ensure at least one image goes to training
         if cfg.test_every >= num_images:
             cfg.test_every = num_images + 1
     except Exception:
-        # If we can't read the camera JSON, let it fail later with a clearer error
+        # If we can't count camera files, let it fail later with a clearer error
         pass
     
     # Apply steps scaler
