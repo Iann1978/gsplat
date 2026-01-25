@@ -71,9 +71,10 @@ python server/train_from_ply.py default \
     --ply-steps "$MAX_STEPS" \
     --eval-steps "$MAX_STEPS" \
     --save-steps "$MAX_STEPS" \
-    --no-normalize-world-space \
+    --normalize-world-space \
     --camera-model pinhole \
-    --disable-viewer
+    --disable-viewer 
+
 
 echo ""
 echo "=========================================="

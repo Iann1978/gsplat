@@ -69,7 +69,7 @@ async def create_job() -> TrainResponse:
         TrainResponse with job_id and UPLOADING status
     """
     logger.info("POST /jobs - Creating new job")
-    job_id = job_manager.create_upload_job()
+    job_id = job_manager.create_job()
     logger.info(f"POST /jobs - Created job: {job_id}")
     
     return TrainResponse(
@@ -259,9 +259,9 @@ async def cancel_job(job_id: str) -> JSONResponse:
     
     # Handle different job states
     if job.status in [JobStatus.UPLOADING, JobStatus.READY]:
-        # Cleanup upload job
+        # Cleanup upload job (full cleanup: delete directory and remove from memory)
         logger.info(f"DELETE /jobs/{job_id} - Cleaning up upload job")
-        success = job_manager.cleanup_upload(job_id)
+        success = job_manager.cleanup_job(job_id)
         if success:
             logger.info(f"DELETE /jobs/{job_id} - Upload job cancelled successfully")
             return JSONResponse(
@@ -274,16 +274,15 @@ async def cancel_job(job_id: str) -> JSONResponse:
     
     elif job.status in [JobStatus.PENDING, JobStatus.RUNNING]:
         # Cancel training job
-        # Cancel the task if it exists
+        # Cancel the async task if it exists
         if job_id in _active_tasks:
             task = _active_tasks[job_id]
             task.cancel()
             del _active_tasks[job_id]
             logger.info(f"DELETE /jobs/{job_id} - Cancelled active task")
         
-        # Update job status
-        job_obj = job_manager._get_job_object(job_id)
-        success = job_obj.cancel() if job_obj else False
+        # Update job status via cleanup_job (keeps directory/memory for logs/results)
+        success = job_manager.cleanup_job(job_id)
         
         if success:
             logger.info(f"DELETE /jobs/{job_id} - Training job cancelled successfully")
@@ -295,7 +294,7 @@ async def cancel_job(job_id: str) -> JSONResponse:
             logger.error(f"DELETE /jobs/{job_id} - Failed to cancel job")
             raise HTTPException(status_code=500, detail="Failed to cancel job")
     else:
-        # Cannot cancel completed/failed jobs
+        # Cannot cancel completed/failed/cancelled jobs
         logger.warning(f"DELETE /jobs/{job_id} - Job cannot be cancelled (status: {job.status})")
         raise HTTPException(
             status_code=400,

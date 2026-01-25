@@ -31,39 +31,6 @@ class JobManager:
         # In-memory job storage: job_id -> Job
         self._jobs: Dict[str, Job] = {}
     
-    def create_job(self, job_id: Optional[str] = None) -> str:
-        """Create a new job and return its ID.
-        
-        Args:
-            job_id: Optional custom job ID (default: generate UUID)
-            
-        Returns:
-            Job ID string
-        """
-        if job_id is None:
-            job_id = str(uuid.uuid4())
-        
-        now = datetime.now()
-        job_info = JobInfo(
-            job_id=job_id,
-            status=JobStatus.PENDING,
-            created_at=now,
-            updated_at=now,
-        )
-        
-        # Create job directory
-        job_dir = self.jobs_dir / job_id
-        job_dir.mkdir(parents=True, exist_ok=True)
-        (job_dir / "input").mkdir(exist_ok=True)
-        (job_dir / "output").mkdir(exist_ok=True)
-        (job_dir / "logs").mkdir(exist_ok=True)
-        
-        # Create and store Job instance
-        job = Job(job_info, job_dir)
-        self._jobs[job_id] = job
-        
-        return job_id
-    
     def get_job(self, job_id: str) -> Optional[JobInfo]:
         """Get job information.
         
@@ -128,8 +95,8 @@ class JobManager:
             if j._info.status in [JobStatus.PENDING, JobStatus.RUNNING]
         ])
     
-    def create_upload_job(self, job_id: Optional[str] = None) -> str:
-        """Create a new upload job in UPLOADING state.
+    def create_job(self, job_id: Optional[str] = None) -> str:
+        """Create a new job in UPLOADING state.
         
         Args:
             job_id: Optional custom job ID (default: generate UUID)
@@ -162,57 +129,40 @@ class JobManager:
         
         return job_id
     
-    def get_upload_status(self, job_id: str) -> Optional[dict]:
-        """Get upload status for a job.
+    def cleanup_job(self, job_id: str) -> bool:
+        """Clean up a job based on its current state.
+        
+        - UPLOADING/READY: Full cleanup (delete directory and remove from memory)
+        - PENDING/RUNNING: Update status to CANCELLED (keep directory/memory for logs/results)
+        - COMPLETED/FAILED/CANCELLED: Cannot cleanup (returns False)
         
         Args:
             job_id: Job identifier
             
         Returns:
-            Dict with upload status, or None if job not found
-            Note: This does NOT run validation automatically. Use validate_job_ready() separately.
+            True if successful, False if job not found or cannot be cleaned up
         """
         job = self._jobs.get(job_id)
         if job is None:
-            return None
+            return False
         
-        # Return current status without auto-validation
-        # is_ready reflects the current job status (READY if previously validated successfully)
-        is_ready = job._info.status == JobStatus.READY
+        status = job._info.status
         
-        return {
-            "job_id": job_id,
-            "status": job._info.status,
-            "ply_uploaded": job._info.ply_uploaded,
-            "cameras_uploaded": job._info.cameras_uploaded,
-            "images_uploaded": job._info.images_uploaded.copy(),
-            "config_uploaded": job._info.config_uploaded,
-            "validation_errors": job._info.validation_errors.copy(),
-            "is_ready": is_ready,
-        }
-    
-    def cleanup_upload(self, job_id: str) -> bool:
-        """Clean up an incomplete upload job.
-        
-        Args:
-            job_id: Job identifier
+        # Full cleanup for incomplete uploads
+        if status in [JobStatus.UPLOADING, JobStatus.READY]:
+            # Delete job directory
+            if job._job_dir.exists():
+                shutil.rmtree(job._job_dir)
             
-        Returns:
-            True if successful, False if job not found or already started
-        """
-        job = self._jobs.get(job_id)
-        if job is None:
+            # Remove from jobs dict
+            del self._jobs[job_id]
+            return True
+        
+        # Cancel active training jobs (keep directory/memory for logs/results)
+        elif status in [JobStatus.PENDING, JobStatus.RUNNING]:
+            job.cancel()
+            return True
+        
+        # Cannot cleanup completed/failed/cancelled jobs
+        else:
             return False
-        
-        # Only allow cleanup if still in UPLOADING or READY state
-        if job._info.status not in [JobStatus.UPLOADING, JobStatus.READY]:
-            return False
-        
-        # Delete job directory
-        if job._job_dir.exists():
-            shutil.rmtree(job._job_dir)
-        
-        # Remove from jobs dict
-        del self._jobs[job_id]
-        
-        return True
