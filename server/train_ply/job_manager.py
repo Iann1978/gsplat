@@ -78,59 +78,16 @@ class JobManager:
             return None
         return job.to_info()
     
-    def update_job_status(
-        self,
-        job_id: str,
-        status: JobStatus,
-        current_step: Optional[int] = None,
-        max_steps: Optional[int] = None,
-        error_message: Optional[str] = None,
-        error_traceback: Optional[str] = None,
-    ) -> bool:
-        """Update job status and progress.
+    def _get_job_object(self, job_id: str) -> Optional[Job]:
+        """Get Job object directly (internal helper).
         
         Args:
             job_id: Job identifier
-            status: New status
-            current_step: Current training step (optional)
-            max_steps: Total training steps (optional)
-            error_message: Error message if failed (optional)
-            error_traceback: Error traceback if failed (optional)
             
         Returns:
-            True if job was updated, False if job not found
+            Job object if found, None otherwise
         """
-        job = self._jobs.get(job_id)
-        if job is None:
-            return False
-        
-        job.update_status(status, current_step, max_steps, error_message, error_traceback)
-        return True
-    
-    def update_job_results(
-        self,
-        job_id: str,
-        result_dir: Optional[str] = None,
-        ply_files: Optional[list] = None,
-        checkpoint_files: Optional[list] = None,
-    ) -> bool:
-        """Update job result paths.
-        
-        Args:
-            job_id: Job identifier
-            result_dir: Directory containing results
-            ply_files: List of PLY file paths
-            checkpoint_files: List of checkpoint file paths
-            
-        Returns:
-            True if job was updated, False if job not found
-        """
-        job = self._jobs.get(job_id)
-        if job is None:
-            return False
-        
-        job.update_results(result_dir, ply_files, checkpoint_files)
-        return True
+        return self._jobs.get(job_id)
     
     def list_jobs(self, status: Optional[JobStatus] = None) -> list[JobInfo]:
         """List all jobs, optionally filtered by status.
@@ -171,21 +128,6 @@ class JobManager:
             if j._info.status in [JobStatus.PENDING, JobStatus.RUNNING]
         ])
     
-    def cancel_job(self, job_id: str) -> bool:
-        """Cancel a job (if it's pending or running).
-        
-        Args:
-            job_id: Job identifier
-            
-        Returns:
-            True if job was cancelled, False otherwise
-        """
-        job = self._jobs.get(job_id)
-        if job is None:
-            return False
-        
-        return job.cancel()
-    
     def create_upload_job(self, job_id: Optional[str] = None) -> str:
         """Create a new upload job in UPLOADING state.
         
@@ -220,87 +162,6 @@ class JobManager:
         
         return job_id
     
-    def upload_ply(self, job_id: str, file_path: Path) -> bool:
-        """Upload PLY file to job.
-        
-        Args:
-            job_id: Job identifier
-            file_path: Path to PLY file to save
-            
-        Returns:
-            True if successful, False if job not found
-        """
-        job = self._jobs.get(job_id)
-        if job is None:
-            return False
-        
-        return job.upload_ply(file_path)
-    
-    def upload_image(self, job_id: str, filename: str, file_path: Path) -> bool:
-        """Upload image file to job.
-        
-        Args:
-            job_id: Job identifier
-            filename: Name of the image file
-            file_path: Path to image file to save
-            
-        Returns:
-            True if successful, False if job not found
-        """
-        job = self._jobs.get(job_id)
-        if job is None:
-            return False
-        
-        return job.upload_image(filename, file_path)
-    
-    def upload_cameras(self, job_id: str, file_path: Path) -> bool:
-        """Upload camera.json file to job.
-        
-        Args:
-            job_id: Job identifier
-            file_path: Path to camera.json file to save
-            
-        Returns:
-            True if successful, False if job not found or invalid JSON
-        """
-        job = self._jobs.get(job_id)
-        if job is None:
-            return False
-        
-        return job.upload_cameras(file_path)
-    
-    def upload_config(self, job_id: str, config: TrainingConfig) -> bool:
-        """Upload training config to job.
-        
-        Args:
-            job_id: Job identifier
-            config: TrainingConfig object
-            
-        Returns:
-            True if successful, False if job not found
-        """
-        job = self._jobs.get(job_id)
-        if job is None:
-            return False
-        
-        job.upload_config(config)
-        return True
-    
-    def validate_job_ready(self, job_id: str) -> tuple[bool, List[str]]:
-        """Validate that job has all required files and is ready to start.
-        
-        Args:
-            job_id: Job identifier
-            
-        Returns:
-            Tuple of (is_ready: bool, errors: List[str])
-        """
-        job = self._jobs.get(job_id)
-        if job is None:
-            return False, [f"Job {job_id} not found"]
-        
-        return job.validate_ready()
-    
     def get_upload_status(self, job_id: str) -> Optional[dict]:
         """Get upload status for a job.
         
@@ -329,21 +190,6 @@ class JobManager:
             "validation_errors": job._info.validation_errors.copy(),
             "is_ready": is_ready,
         }
-    
-    def start_training_from_upload(self, job_id: str) -> bool:
-        """Start training from an uploaded job.
-        
-        Args:
-            job_id: Job identifier
-            
-        Returns:
-            True if successful, False if validation fails
-        """
-        job = self._jobs.get(job_id)
-        if job is None:
-            return False
-        
-        return job.start_training()
     
     def cleanup_upload(self, job_id: str) -> bool:
         """Clean up an incomplete upload job.

@@ -100,7 +100,9 @@ async def get_job_status(job_id: str) -> JobInfo:
     # Auto-validate if job is in UPLOADING or READY state
     if job.status in [JobStatus.UPLOADING, JobStatus.READY]:
         logger.debug(f"GET /jobs/{job_id} - Auto-validating job")
-        job_manager.validate_job_ready(job_id)
+        job_obj = job_manager._get_job_object(job_id)
+        if job_obj:
+            job_obj.validate_ready()
         job = job_manager.get_job(job_id)  # Refresh to get updated validation_errors
     
     logger.info(f"GET /jobs/{job_id} - Returning status: {job.status}")
@@ -280,7 +282,8 @@ async def cancel_job(job_id: str) -> JSONResponse:
             logger.info(f"DELETE /jobs/{job_id} - Cancelled active task")
         
         # Update job status
-        success = job_manager.cancel_job(job_id)
+        job_obj = job_manager._get_job_object(job_id)
+        success = job_obj.cancel() if job_obj else False
         
         if success:
             logger.info(f"DELETE /jobs/{job_id} - Training job cancelled successfully")
@@ -336,7 +339,8 @@ async def upload_ply(job_id: str, ply_file: UploadFile = File(..., description="
         tmp_path = Path(tmp_file.name)
     
     try:
-        success = job_manager.upload_ply(job_id, tmp_path)
+        job_obj = job_manager._get_job_object(job_id)
+        success = job_obj.upload_ply(tmp_path) if job_obj else False
         if not success:
             logger.error(f"POST /jobs/{job_id}/ply - Failed to upload PLY file")
             raise HTTPException(status_code=500, detail="Failed to upload PLY file")
@@ -411,7 +415,8 @@ async def upload_images(job_id: str, images: List[UploadFile] = File(..., descri
             tmp_path = Path(tmp_file.name)
         
         try:
-            success = job_manager.upload_image(job_id, image.filename, tmp_path)
+            job_obj = job_manager._get_job_object(job_id)
+            success = job_obj.upload_image(image.filename, tmp_path) if job_obj else False
             if success:
                 uploaded_images.append(image.filename)
             else:
@@ -486,7 +491,8 @@ async def upload_cameras(job_id: str, cameras_json: UploadFile = File(..., descr
         tmp_path = Path(tmp_file.name)
     
     try:
-        success = job_manager.upload_cameras(job_id, tmp_path)
+        job_obj = job_manager._get_job_object(job_id)
+        success = job_obj.upload_cameras(tmp_path) if job_obj else False
         if not success:
             logger.error(f"POST /jobs/{job_id}/cameras - Invalid camera JSON format")
             raise HTTPException(status_code=400, detail="Invalid camera JSON format")
@@ -544,7 +550,12 @@ async def upload_config(job_id: str, config_json: str = Form(..., description="T
             detail=f"Invalid training config JSON: {str(e)}",
         )
     
-    success = job_manager.upload_config(job_id, training_config)
+    job_obj = job_manager._get_job_object(job_id)
+    if job_obj:
+        job_obj.upload_config(training_config)
+        success = True
+    else:
+        success = False
     if not success:
         logger.error(f"POST /jobs/{job_id}/config - Failed to upload config")
         raise HTTPException(status_code=500, detail="Failed to upload config")
@@ -591,7 +602,11 @@ async def start_training_from_upload(job_id: str) -> TrainResponse:
     
     # Validate and start (auto-validation)
     logger.debug(f"POST /jobs/{job_id}/start - Validating job before starting")
-    is_ready, errors = job_manager.validate_job_ready(job_id)
+    job_obj = job_manager._get_job_object(job_id)
+    if job_obj:
+        is_ready, errors = job_obj.validate_ready()
+    else:
+        is_ready, errors = False, [f"Job {job_id} not found"]
     if not is_ready:
         logger.warning(f"POST /jobs/{job_id}/start - Job validation failed: {errors}")
         raise HTTPException(
@@ -599,7 +614,8 @@ async def start_training_from_upload(job_id: str) -> TrainResponse:
             detail=f"Job {job_id} is not ready to start. Errors: {errors}",
         )
     
-    success = job_manager.start_training_from_upload(job_id)
+    job_obj = job_manager._get_job_object(job_id)
+    success = job_obj.start_training() if job_obj else False
     if not success:
         logger.error(f"POST /jobs/{job_id}/start - Failed to start training")
         raise HTTPException(

@@ -46,7 +46,9 @@ async def run_training_job(
     """
     try:
         # Update status to running
-        job_manager.update_job_status(job_id, JobStatus.RUNNING)
+        job_obj = job_manager._get_job_object(job_id)
+        if job_obj:
+            job_obj.update_status(JobStatus.RUNNING)
         
         # Get job directory
         job_dir = job_manager.get_job_dir(job_id)
@@ -86,7 +88,9 @@ async def run_training_job(
         )
         
         # Training completed successfully
-        job_manager.update_job_status(job_id, JobStatus.COMPLETED)
+        job_obj = job_manager._get_job_object(job_id)
+        if job_obj:
+            job_obj.update_status(JobStatus.COMPLETED)
         
         # Update result paths
         _update_job_results(job_id, job_manager, result_dir)
@@ -96,12 +100,9 @@ async def run_training_job(
         error_msg = str(e)
         error_tb = traceback.format_exc()
         
-        job_manager.update_job_status(
-            job_id,
-            JobStatus.FAILED,
-            error_message=error_msg,
-            error_traceback=error_tb,
-        )
+        job_obj = job_manager._get_job_object(job_id)
+        if job_obj:
+            job_obj.update_status(JobStatus.FAILED, error_message=error_msg, error_traceback=error_tb)
         
         # Save error log
         job_dir = job_manager.get_job_dir(job_id)
@@ -158,12 +159,9 @@ def _run_training_sync(
                 # Update job progress
                 if cfg.max_steps > 0:
                     progress = step / cfg.max_steps
-                    job_manager.update_job_status(
-                        job_id,
-                        JobStatus.RUNNING,
-                        current_step=step,
-                        max_steps=cfg.max_steps,
-                    )
+                    job_obj = job_manager._get_job_object(job_id)
+                    if job_obj:
+                        job_obj.update_status(JobStatus.RUNNING, current_step=step, max_steps=cfg.max_steps)
                 
                 # Call original eval
                 return original_eval(step, stage)
@@ -306,9 +304,6 @@ def _update_job_results(
     if ckpt_dir.exists():
         checkpoint_files = sorted([str(f) for f in ckpt_dir.glob("*.pt")])
     
-    job_manager.update_job_results(
-        job_id,
-        result_dir=str(result_dir),
-        ply_files=ply_files,
-        checkpoint_files=checkpoint_files,
-    )
+    job_obj = job_manager._get_job_object(job_id)
+    if job_obj:
+        job_obj.update_results(result_dir=str(result_dir), ply_files=ply_files, checkpoint_files=checkpoint_files)
