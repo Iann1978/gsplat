@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 
 class JobStatus(str, Enum):
     """Job status enumeration."""
+    UPLOADING = "uploading"
+    READY = "ready"
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -122,6 +124,13 @@ class JobInfo(BaseModel):
     
     # Training configuration
     config: Optional[TrainingConfig] = Field(default=None, description="Training configuration used")
+    
+    # Upload tracking
+    ply_uploaded: bool = Field(default=False, description="Whether PLY file is uploaded")
+    cameras_uploaded: bool = Field(default=False, description="Whether camera.json is uploaded")
+    images_uploaded: List[str] = Field(default_factory=list, description="List of uploaded image filenames")
+    config_uploaded: bool = Field(default=False, description="Whether training config is uploaded")
+    validation_errors: List[str] = Field(default_factory=list, description="List of validation errors")
 
 
 class HealthResponse(BaseModel):
@@ -129,3 +138,15 @@ class HealthResponse(BaseModel):
     status: str = Field(default="healthy", description="Service status")
     active_jobs: int = Field(default=0, ge=0, description="Number of active training jobs")
     total_jobs: int = Field(default=0, ge=0, description="Total number of jobs")
+
+
+class UploadStatusResponse(BaseModel):
+    """Response for upload status check."""
+    job_id: str = Field(..., description="Job identifier")
+    status: JobStatus = Field(..., description="Current job status")
+    ply_uploaded: bool = Field(..., description="Whether PLY file is uploaded")
+    cameras_uploaded: bool = Field(..., description="Whether camera.json is uploaded")
+    images_uploaded: List[str] = Field(..., description="List of uploaded image filenames")
+    config_uploaded: bool = Field(..., description="Whether training config is uploaded")
+    validation_errors: List[str] = Field(..., description="List of validation errors")
+    is_ready: bool = Field(..., description="Whether job is ready to start training")

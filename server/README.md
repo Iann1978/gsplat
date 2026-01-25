@@ -17,6 +17,12 @@ server/
 ├── ply_loader.py         # PLY file parsing utility
 ├── camera_parser.py      # JSON camera data parser
 ├── train_from_ply.py     # Main training script
+├── train_ply/            # REST API service for training
+│   ├── main.py           # FastAPI application
+│   ├── job_manager.py    # Job state management
+│   ├── models.py         # Pydantic models
+│   ├── training_worker.py # Background training worker
+│   └── README.md         # API documentation
 └── README.md             # This file
 ```
 
@@ -280,6 +286,47 @@ PyTorch dataset for camera data.
 - The script automatically determines SH degree from the PLY file properties
 - Training uses L1 + SSIM loss by default
 - Densification strategies help improve model quality during training
+
+## REST API Service
+
+For programmatic access and integration, a FastAPI-based REST API service is available in `server/train_ply/`. This service provides:
+
+- **Bulk Upload API**: Upload all files (PLY, camera JSON, images) in a single request
+- **Incremental Upload API**: Upload files one-by-one before starting training
+- **Job Management**: Track training jobs with status updates and progress monitoring
+- **Result Download**: Download trained models, checkpoints, renders, and statistics
+- **Async Processing**: Long-running training jobs execute asynchronously
+
+### Quick Start
+
+```bash
+# Start the API server
+python -m server.train_ply.main
+
+# Or using uvicorn
+uvicorn server.train_ply.main:app --host 0.0.0.0 --port 8000
+```
+
+Visit `http://localhost:8000/docs` for interactive API documentation.
+
+### Incremental Upload Feature
+
+The API supports incremental uploads, allowing you to:
+- Create an upload job
+- Upload PLY file separately
+- Upload images one-by-one
+- Upload camera JSON
+- Upload training configuration
+- Validate completeness before starting
+- Start training when ready
+
+This is particularly useful for:
+- Large files that may timeout in bulk uploads
+- Dynamically generated files
+- Better error handling and validation
+- More control over the upload process
+
+See `server/train_ply/README.md` for complete API documentation and examples.
 
 ## License
 

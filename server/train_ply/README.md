@@ -122,6 +122,8 @@ Get the status of a training job.
 ```
 
 **Job Status Values:**
+- `uploading`: Job created, files being uploaded (incremental upload mode)
+- `ready`: All required files uploaded, ready to start training (incremental upload mode)
 - `pending`: Job created but not started
 - `running`: Training in progress
 - `completed`: Training completed successfully
@@ -197,6 +199,312 @@ Health check endpoint.
   "total_jobs": 10
 }
 ```
+
+## Incremental Upload API
+
+The API supports incremental uploads, allowing you to upload files one-by-one before starting training. This is useful for large files or when files are generated dynamically.
+
+### POST /train/create
+
+Create a new upload job for incremental file uploads.
+
+**Request:**
+- Method: `POST`
+- Path: `/train/create`
+
+**Response:**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "uploading",
+  "message": "Upload job created successfully"
+}
+```
+
+### POST /train/{job_id}/ply
+
+Upload PLY file to a job.
+
+**Request:**
+- Method: `POST`
+- Path: `/train/{job_id}/ply`
+- Content-Type: `multipart/form-data`
+- Parameters:
+  - `ply_file`: PLY file (required)
+
+**Response:**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "uploading",
+  "ply_uploaded": true
+}
+```
+
+**Example:**
+```bash
+curl -X POST "http://localhost:8000/train/{job_id}/ply" \
+  -F "ply_file=@path/to/model.ply"
+```
+
+### POST /train/{job_id}/image
+
+Upload a single image file to a job.
+
+**Request:**
+- Method: `POST`
+- Path: `/train/{job_id}/image`
+- Content-Type: `multipart/form-data`
+- Parameters:
+  - `image`: Image file (required)
+
+**Response:**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "uploading",
+  "images_uploaded": ["image1.jpg", "image2.jpg"]
+}
+```
+
+**Example:**
+```bash
+curl -X POST "http://localhost:8000/train/{job_id}/image" \
+  -F "image=@path/to/image1.jpg"
+
+curl -X POST "http://localhost:8000/train/{job_id}/image" \
+  -F "image=@path/to/image2.jpg"
+```
+
+**Note:** Duplicate image uploads will return a 409 Conflict error.
+
+### POST /train/{job_id}/cameras
+
+Upload camera.json file to a job.
+
+**Request:**
+- Method: `POST`
+- Path: `/train/{job_id}/cameras`
+- Content-Type: `multipart/form-data`
+- Parameters:
+  - `cameras_json`: Camera JSON file (required)
+
+**Response:**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "ready",
+  "cameras_uploaded": true,
+  "validation_errors": []
+}
+```
+
+**Example:**
+```bash
+curl -X POST "http://localhost:8000/train/{job_id}/cameras" \
+  -F "cameras_json=@path/to/cameras.json"
+```
+
+**Note:** The camera JSON is validated immediately. If images don't match camera keys, validation errors will be returned.
+
+### POST /train/{job_id}/config
+
+Upload training configuration to a job.
+
+**Request:**
+- Method: `POST`
+- Path: `/train/{job_id}/config`
+- Content-Type: `application/x-www-form-urlencoded`
+- Parameters:
+  - `config_json`: Training configuration as JSON string (required)
+
+**Response:**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "uploading",
+  "config_uploaded": true
+}
+```
+
+**Example:**
+```bash
+curl -X POST "http://localhost:8000/train/{job_id}/config" \
+  -F "config_json={\"max_steps\": 30000, \"batch_size\": 1}"
+```
+
+### GET /train/{job_id}/upload-status
+
+Get upload status and validation status for a job.
+
+**Request:**
+- Method: `GET`
+- Path: `/train/{job_id}/upload-status`
+
+**Response:**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "ready",
+  "ply_uploaded": true,
+  "cameras_uploaded": true,
+  "images_uploaded": ["image1.jpg", "image2.jpg"],
+  "config_uploaded": false,
+  "validation_errors": [],
+  "is_ready": true
+}
+```
+
+**Example:**
+```bash
+curl "http://localhost:8000/train/{job_id}/upload-status"
+```
+
+### POST /train/{job_id}/start
+
+Start training from an uploaded job. Validates that all required files are present before starting.
+
+**Request:**
+- Method: `POST`
+- Path: `/train/{job_id}/start`
+
+**Response:**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "pending",
+  "message": "Training started successfully"
+}
+```
+
+**Example:**
+```bash
+curl -X POST "http://localhost:8000/train/{job_id}/start"
+```
+
+**Error Response (if not ready):**
+```json
+{
+  "detail": "Job {job_id} is not ready to start. Errors: ['Missing images referenced in camera JSON: {'image3.jpg'}']"
+}
+```
+
+### DELETE /train/{job_id}/upload
+
+Cancel an incomplete upload job and delete uploaded files.
+
+**Request:**
+- Method: `DELETE`
+- Path: `/train/{job_id}/upload`
+
+**Response:**
+```json
+{
+  "message": "Upload {job_id} cancelled successfully"
+}
+```
+
+**Example:**
+```bash
+curl -X DELETE "http://localhost:8000/train/{job_id}/upload"
+```
+
+**Note:** Only jobs in `uploading` or `ready` status can be cancelled this way.
+
+## Incremental Upload Workflow
+
+Here's a complete example of using the incremental upload API:
+
+```python
+import requests
+import json
+import time
+
+BASE_URL = "http://localhost:8000"
+
+# Step 1: Create upload job
+response = requests.post(f"{BASE_URL}/train/create")
+job_data = response.json()
+job_id = job_data["job_id"]
+print(f"Created job: {job_id}")
+
+# Step 2: Upload PLY file
+with open("path/to/model.ply", "rb") as f:
+    response = requests.post(
+        f"{BASE_URL}/train/{job_id}/ply",
+        files={"ply_file": f}
+    )
+print("PLY uploaded")
+
+# Step 3: Upload images one by one
+for img_path in ["image1.jpg", "image2.jpg", "image3.jpg"]:
+    with open(f"path/to/{img_path}", "rb") as f:
+        response = requests.post(
+            f"{BASE_URL}/train/{job_id}/image",
+            files={"image": (img_path, f)}
+        )
+    print(f"Uploaded {img_path}")
+
+# Step 4: Upload camera JSON
+with open("path/to/cameras.json", "rb") as f:
+    response = requests.post(
+        f"{BASE_URL}/train/{job_id}/cameras",
+        files={"cameras_json": f}
+    )
+print("Cameras uploaded")
+
+# Step 5: Check upload status
+response = requests.get(f"{BASE_URL}/train/{job_id}/upload-status")
+status = response.json()
+print(f"Status: {status['status']}, Ready: {status['is_ready']}")
+if status['validation_errors']:
+    print(f"Validation errors: {status['validation_errors']}")
+
+# Step 6: Upload config (optional)
+config = {
+    "max_steps": 30000,
+    "batch_size": 1,
+    "sh_degree": 3,
+}
+response = requests.post(
+    f"{BASE_URL}/train/{job_id}/config",
+    data={"config_json": json.dumps(config)}
+)
+print("Config uploaded")
+
+# Step 7: Start training
+response = requests.post(f"{BASE_URL}/train/{job_id}/start")
+print("Training started!")
+
+# Step 8: Monitor training (same as bulk upload)
+while True:
+    response = requests.get(f"{BASE_URL}/train/{job_id}/status")
+    status = response.json()
+    
+    print(f"Status: {status['status']}, Progress: {status.get('progress', 0):.2%}")
+    
+    if status["status"] == "completed":
+        break
+    elif status["status"] == "failed":
+        print(f"Failed: {status.get('error_message')}")
+        break
+    
+    time.sleep(5)
+```
+
+## Choosing Between Bulk and Incremental Upload
+
+**Use Bulk Upload (`POST /train`) when:**
+- All files are available at once
+- Files are small to medium size
+- You want a simpler workflow
+
+**Use Incremental Upload (`POST /train/create` + individual uploads) when:**
+- Files are large and may timeout
+- Files are generated dynamically
+- You want to upload files one-by-one
+- You want to validate files before starting training
+- You want more control over the upload process
 
 ## Training Configuration
 
