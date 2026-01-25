@@ -12,11 +12,11 @@ from pathlib import Path
 from typing import List, Optional
 
 import aiofiles
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from .job_manager import JobManager
-from .models import HealthResponse, JobInfo, JobStatus, TrainResponse, TrainingConfig, UploadStatusResponse, ValidateResponse
+from .models import HealthResponse, JobInfo, JobStatus, TrainResponse, TrainingConfig
 from .training_worker import run_training_job
 
 # Configure logger
@@ -61,172 +61,53 @@ job_manager = JobManager(jobs_dir=JOBS_DIR)
 _active_tasks: dict[str, asyncio.Task] = {}
 
 
-@app.post("/train", response_model=TrainResponse)
-async def start_training(
-    background_tasks: BackgroundTasks,
-    ply_file: UploadFile = File(..., description="PLY file"),
-    camera_json: UploadFile = File(..., description="Camera JSON file"),
-    images: List[UploadFile] = File(..., description="Image files"),
-    config_json: Optional[str] = Form(None, description="Training configuration as JSON"),
-) -> TrainResponse:
-    """Start a new training job.
+@app.post("/jobs", response_model=TrainResponse, status_code=201)
+async def create_job() -> TrainResponse:
+    """Create a new training job.
     
-    Args:
-        background_tasks: FastAPI background tasks
-        ply_file: PLY file upload
-        camera_json: Camera JSON file upload
-        images: List of image file uploads
-        config_json: Optional training configuration JSON string
-        
     Returns:
-        TrainResponse with job_id and status
+        TrainResponse with job_id and UPLOADING status
     """
-    logger.info(f"POST /train - Received training request: {len(images)} images, config={'provided' if config_json else 'not provided'}")
-    logger.debug(f"POST /train - Training config: {config_json}")
+    logger.info("POST /jobs - Creating new job")
+    job_id = job_manager.create_upload_job()
+    logger.info(f"POST /jobs - Created job: {job_id}")
     
-    # Check concurrent job limit
-    active_count = job_manager.get_active_jobs_count()
-    if active_count >= MAX_CONCURRENT_JOBS:
-        logger.warning(f"POST /train - Maximum concurrent jobs ({MAX_CONCURRENT_JOBS}) reached")
-        raise HTTPException(
-            status_code=503,
-            detail=f"Maximum concurrent jobs ({MAX_CONCURRENT_JOBS}) reached. Please wait for a job to complete.",
-        )
-    
-    # Create job
-    job_id = job_manager.create_job()
-    logger.info(f"POST /train - Created job: {job_id}")
-    job_dir = job_manager.get_job_dir(job_id)
-    
-    if job_dir is None:
-        logger.error(f"POST /train - Failed to create job directory for job: {job_id}")
-        raise HTTPException(status_code=500, detail="Failed to create job directory")
-    
-    try:
-        # Save uploaded files
-        input_dir = job_dir / "input"
-        images_dir = input_dir / "images"
-        images_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Save PLY file
-        ply_path = input_dir / "model.ply"
-        async with aiofiles.open(ply_path, "wb") as f:
-            content = await ply_file.read()
-            await f.write(content)
-        
-        # Save camera JSON
-        camera_json_path = input_dir / "cameras.json"
-        async with aiofiles.open(camera_json_path, "wb") as f:
-            content = await camera_json.read()
-            await f.write(content)
-        
-        # Validate camera JSON
-        try:
-            async with aiofiles.open(camera_json_path, "r") as f:
-                content = await f.read()
-                camera_data = json.loads(content)
-        except json.JSONDecodeError as e:
-            logger.error(f"POST /train - Invalid camera JSON for job {job_id}: {str(e)}")
-            raise HTTPException(status_code=400, detail=f"Invalid camera JSON: {str(e)}")
-        
-        # Save images
-        image_names = []
-        for img_file in images:
-            if img_file.filename:
-                image_path = images_dir / img_file.filename
-                async with aiofiles.open(image_path, "wb") as f:
-                    content = await img_file.read()
-                    await f.write(content)
-                image_names.append(img_file.filename)
-        
-        # Validate that images match camera JSON
-        camera_image_names = set(camera_data.keys())
-        uploaded_image_names = set(image_names)
-        
-        if not camera_image_names.issubset(uploaded_image_names):
-            missing = camera_image_names - uploaded_image_names
-            logger.error(f"POST /train - Missing images for job {job_id}: {missing}")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Missing images referenced in camera JSON: {missing}",
-            )
-        
-        # Parse training config
-        training_config = None
-        if config_json:
-            try:
-                config_dict = json.loads(config_json)
-                training_config = TrainingConfig(**config_dict)
-                training_config.normalize_world_space = True
-            except Exception as e:
-                logger.error(f"POST /train - Invalid training config JSON for job {job_id}: {str(e)}")
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid training config JSON: {str(e)}",
-                )
-        
-        # Start training task
-        task = asyncio.create_task(
-            run_training_job(
-                job_id=job_id,
-                job_manager=job_manager,
-                ply_file_path=str(ply_path),
-                camera_json_path=str(camera_json_path),
-                data_dir=str(input_dir),
-                training_config=training_config,
-                result_base_dir=RESULT_BASE_DIR,
-            )
-        )
-        _active_tasks[job_id] = task
-        
-        # Clean up task when done
-        def cleanup_task(job_id: str):
-            if job_id in _active_tasks:
-                del _active_tasks[job_id]
-        
-        task.add_done_callback(lambda _: cleanup_task(job_id))
-        
-        logger.info(f"POST /train - Training job {job_id} started successfully")
-        return TrainResponse(
-            job_id=job_id,
-            status=JobStatus.PENDING,
-            message="Training job created successfully",
-        )
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        # Clean up on error
-        logger.error(f"POST /train - Failed to start training for job {job_id}: {str(e)}")
-        job_manager.update_job_status(
-            job_id,
-            JobStatus.FAILED,
-            error_message=str(e),
-        )
-        raise HTTPException(status_code=500, detail=f"Failed to start training: {str(e)}")
+    return TrainResponse(
+        job_id=job_id,
+        status=JobStatus.UPLOADING,
+        message="Job created successfully",
+    )
 
 
-@app.get("/train/{job_id}/status", response_model=JobInfo)
+@app.get("/jobs/{job_id}", response_model=JobInfo)
 async def get_job_status(job_id: str) -> JobInfo:
-    """Get the status of a training job.
+    """Get comprehensive job status and information.
+    
+    Automatically validates job if status is UPLOADING or READY.
     
     Args:
         job_id: Job identifier
         
     Returns:
-        JobInfo with current status and progress
+        JobInfo with current status, progress, upload status, and validation errors
     """
-    logger.info(f"GET /train/{job_id}/status - Job status requested")
+    logger.info(f"GET /jobs/{job_id} - Job status requested")
     job = job_manager.get_job(job_id)
     if job is None:
-        logger.error(f"GET /train/{job_id}/status - Job not found: {job_id}")
+        logger.error(f"GET /jobs/{job_id} - Job not found: {job_id}")
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     
-    logger.info(f"GET /train/{job_id}/status - Returning status: {job.status}")
+    # Auto-validate if job is in UPLOADING or READY state
+    if job.status in [JobStatus.UPLOADING, JobStatus.READY]:
+        logger.debug(f"GET /jobs/{job_id} - Auto-validating job")
+        job_manager.validate_job_ready(job_id)
+        job = job_manager.get_job(job_id)  # Refresh to get updated validation_errors
+    
+    logger.info(f"GET /jobs/{job_id} - Returning status: {job.status}")
     return job
 
 
-@app.get("/train/{job_id}/results")
+@app.get("/jobs/{job_id}/results")
 async def get_job_results(job_id: str, file_type: Optional[str] = None) -> FileResponse:
     """Download training results.
     
@@ -237,26 +118,26 @@ async def get_job_results(job_id: str, file_type: Optional[str] = None) -> FileR
     Returns:
         Zip file with results or individual file
     """
-    logger.info(f"GET /train/{job_id}/results - Results requested (file_type: {file_type or 'all'})")
+    logger.info(f"GET /jobs/{job_id}/results - Results requested (file_type: {file_type or 'all'})")
     job = job_manager.get_job(job_id)
     if job is None:
-        logger.error(f"GET /train/{job_id}/results - Job not found: {job_id}")
+        logger.error(f"GET /jobs/{job_id}/results - Job not found: {job_id}")
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     
     if job.status != JobStatus.COMPLETED:
-        logger.warning(f"GET /train/{job_id}/results - Job not completed (status: {job.status})")
+        logger.warning(f"GET /jobs/{job_id}/results - Job not completed (status: {job.status})")
         raise HTTPException(
             status_code=400,
             detail=f"Job {job_id} is not completed (status: {job.status})",
         )
     
     if job.result_dir is None:
-        logger.error(f"GET /train/{job_id}/results - Results not found for job: {job_id}")
+        logger.error(f"GET /jobs/{job_id}/results - Results not found for job: {job_id}")
         raise HTTPException(status_code=404, detail="Results not found")
     
     result_dir = Path(job.result_dir)
     if not result_dir.exists():
-        logger.error(f"GET /train/{job_id}/results - Result directory does not exist: {result_dir}")
+        logger.error(f"GET /jobs/{job_id}/results - Result directory does not exist: {result_dir}")
         raise HTTPException(status_code=404, detail="Result directory does not exist")
     
     # If file_type is specified, return individual file or directory
@@ -266,25 +147,25 @@ async def get_job_results(job_id: str, file_type: Optional[str] = None) -> FileR
             if ply_dir.exists() and any(ply_dir.glob("*.ply")):
                 # Return first PLY file or create zip of all
                 ply_files = list(ply_dir.glob("*.ply"))
-                logger.info(f"GET /train/{job_id}/results - Returning {len(ply_files)} PLY file(s)")
+                logger.info(f"GET /jobs/{job_id}/results - Returning {len(ply_files)} PLY file(s)")
                 if len(ply_files) == 1:
                     return FileResponse(ply_files[0], media_type="application/octet-stream")
                 else:
                     # Create zip of all PLY files
                     return _create_zip_response(ply_files, f"{job_id}_ply.zip")
-            logger.error(f"GET /train/{job_id}/results - No PLY files found")
+            logger.error(f"GET /jobs/{job_id}/results - No PLY files found")
             raise HTTPException(status_code=404, detail="No PLY files found")
         
         elif file_type == "checkpoint":
             ckpt_dir = result_dir / "ckpts"
             if ckpt_dir.exists() and any(ckpt_dir.glob("*.pt")):
                 ckpt_files = list(ckpt_dir.glob("*.pt"))
-                logger.info(f"GET /train/{job_id}/results - Returning {len(ckpt_files)} checkpoint file(s)")
+                logger.info(f"GET /jobs/{job_id}/results - Returning {len(ckpt_files)} checkpoint file(s)")
                 if len(ckpt_files) == 1:
                     return FileResponse(ckpt_files[0], media_type="application/octet-stream")
                 else:
                     return _create_zip_response(ckpt_files, f"{job_id}_checkpoints.zip")
-            logger.error(f"GET /train/{job_id}/results - No checkpoint files found")
+            logger.error(f"GET /jobs/{job_id}/results - No checkpoint files found")
             raise HTTPException(status_code=404, detail="No checkpoint files found")
         
         elif file_type == "render":
@@ -292,9 +173,9 @@ async def get_job_results(job_id: str, file_type: Optional[str] = None) -> FileR
             if render_dir.exists():
                 render_files = list(render_dir.glob("*.png"))
                 if render_files:
-                    logger.info(f"GET /train/{job_id}/results - Returning {len(render_files)} render file(s)")
+                    logger.info(f"GET /jobs/{job_id}/results - Returning {len(render_files)} render file(s)")
                     return _create_zip_response(render_files, f"{job_id}_renders.zip")
-            logger.error(f"GET /train/{job_id}/results - No render files found")
+            logger.error(f"GET /jobs/{job_id}/results - No render files found")
             raise HTTPException(status_code=404, detail="No render files found")
         
         elif file_type == "stats":
@@ -302,17 +183,17 @@ async def get_job_results(job_id: str, file_type: Optional[str] = None) -> FileR
             if stats_dir.exists():
                 stats_files = list(stats_dir.glob("*.json"))
                 if stats_files:
-                    logger.info(f"GET /train/{job_id}/results - Returning {len(stats_files)} stats file(s)")
+                    logger.info(f"GET /jobs/{job_id}/results - Returning {len(stats_files)} stats file(s)")
                     return _create_zip_response(stats_files, f"{job_id}_stats.zip")
-            logger.error(f"GET /train/{job_id}/results - No stats files found")
+            logger.error(f"GET /jobs/{job_id}/results - No stats files found")
             raise HTTPException(status_code=404, detail="No stats files found")
     
     # Default: create zip of all results
-    logger.info(f"GET /train/{job_id}/results - Returning all results as zip")
+    logger.info(f"GET /jobs/{job_id}/results - Returning all results as zip")
     return _create_results_zip(job_id, result_dir)
 
 
-@app.get("/train/{job_id}/logs")
+@app.get("/jobs/{job_id}/logs")
 async def get_job_logs(job_id: str) -> StreamingResponse:
     """Get training logs for a job.
     
@@ -322,15 +203,15 @@ async def get_job_logs(job_id: str) -> StreamingResponse:
     Returns:
         Text log content
     """
-    logger.info(f"GET /train/{job_id}/logs - Logs requested")
+    logger.info(f"GET /jobs/{job_id}/logs - Logs requested")
     job = job_manager.get_job(job_id)
     if job is None:
-        logger.error(f"GET /train/{job_id}/logs - Job not found: {job_id}")
+        logger.error(f"GET /jobs/{job_id}/logs - Job not found: {job_id}")
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     
     job_dir = job_manager.get_job_dir(job_id)
     if job_dir is None:
-        logger.error(f"GET /train/{job_id}/logs - Job directory not found: {job_id}")
+        logger.error(f"GET /jobs/{job_id}/logs - Job directory not found: {job_id}")
         raise HTTPException(status_code=404, detail="Job directory not found")
     
     log_file = job_dir / "logs" / "training.log"
@@ -338,16 +219,16 @@ async def get_job_logs(job_id: str) -> StreamingResponse:
         # Return error log if available
         error_log = job_dir / "logs" / "error.log"
         if error_log.exists():
-            logger.info(f"GET /train/{job_id}/logs - Returning error log")
+            logger.info(f"GET /jobs/{job_id}/logs - Returning error log")
             async def read_error_log():
                 async with aiofiles.open(error_log, "r") as f:
                     content = await f.read()
                     yield content
             return StreamingResponse(read_error_log(), media_type="text/plain")
-        logger.error(f"GET /train/{job_id}/logs - Log file not found")
+        logger.error(f"GET /jobs/{job_id}/logs - Log file not found")
         raise HTTPException(status_code=404, detail="Log file not found")
     
-    logger.info(f"GET /train/{job_id}/logs - Returning training log")
+    logger.info(f"GET /jobs/{job_id}/logs - Returning training log")
     async def read_log():
         async with aiofiles.open(log_file, "r") as f:
             async for line in f:
@@ -356,9 +237,11 @@ async def get_job_logs(job_id: str) -> StreamingResponse:
     return StreamingResponse(read_log(), media_type="text/plain")
 
 
-@app.delete("/train/{job_id}")
+@app.delete("/jobs/{job_id}")
 async def cancel_job(job_id: str) -> JSONResponse:
-    """Cancel a running training job.
+    """Cancel or delete a job.
+    
+    Handles both active training jobs (PENDING/RUNNING) and incomplete uploads (UPLOADING/READY).
     
     Args:
         job_id: Job identifier
@@ -366,57 +249,58 @@ async def cancel_job(job_id: str) -> JSONResponse:
     Returns:
         JSON response with cancellation status
     """
-    logger.info(f"DELETE /train/{job_id} - Cancellation requested")
+    logger.info(f"DELETE /jobs/{job_id} - Cancellation requested")
     job = job_manager.get_job(job_id)
     if job is None:
-        logger.error(f"DELETE /train/{job_id} - Job not found: {job_id}")
+        logger.error(f"DELETE /jobs/{job_id} - Job not found: {job_id}")
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     
-    if job.status not in [JobStatus.PENDING, JobStatus.RUNNING]:
-        logger.warning(f"DELETE /train/{job_id} - Job cannot be cancelled (status: {job.status})")
+    # Handle different job states
+    if job.status in [JobStatus.UPLOADING, JobStatus.READY]:
+        # Cleanup upload job
+        logger.info(f"DELETE /jobs/{job_id} - Cleaning up upload job")
+        success = job_manager.cleanup_upload(job_id)
+        if success:
+            logger.info(f"DELETE /jobs/{job_id} - Upload job cancelled successfully")
+            return JSONResponse(
+                content={"message": f"Job {job_id} cancelled successfully"},
+                status_code=200,
+            )
+        else:
+            logger.error(f"DELETE /jobs/{job_id} - Failed to cancel upload job")
+            raise HTTPException(status_code=500, detail="Failed to cancel upload job")
+    
+    elif job.status in [JobStatus.PENDING, JobStatus.RUNNING]:
+        # Cancel training job
+        # Cancel the task if it exists
+        if job_id in _active_tasks:
+            task = _active_tasks[job_id]
+            task.cancel()
+            del _active_tasks[job_id]
+            logger.info(f"DELETE /jobs/{job_id} - Cancelled active task")
+        
+        # Update job status
+        success = job_manager.cancel_job(job_id)
+        
+        if success:
+            logger.info(f"DELETE /jobs/{job_id} - Training job cancelled successfully")
+            return JSONResponse(
+                content={"message": f"Job {job_id} cancelled successfully"},
+                status_code=200,
+            )
+        else:
+            logger.error(f"DELETE /jobs/{job_id} - Failed to cancel job")
+            raise HTTPException(status_code=500, detail="Failed to cancel job")
+    else:
+        # Cannot cancel completed/failed jobs
+        logger.warning(f"DELETE /jobs/{job_id} - Job cannot be cancelled (status: {job.status})")
         raise HTTPException(
             status_code=400,
             detail=f"Job {job_id} cannot be cancelled (status: {job.status})",
         )
-    
-    # Cancel the task if it exists
-    if job_id in _active_tasks:
-        task = _active_tasks[job_id]
-        task.cancel()
-        del _active_tasks[job_id]
-        logger.info(f"DELETE /train/{job_id} - Cancelled active task")
-    
-    # Update job status
-    success = job_manager.cancel_job(job_id)
-    
-    if success:
-        logger.info(f"DELETE /train/{job_id} - Job cancelled successfully")
-        return JSONResponse(
-            content={"message": f"Job {job_id} cancelled successfully"},
-            status_code=200,
-        )
-    else:
-        logger.error(f"DELETE /train/{job_id} - Failed to cancel job")
-        raise HTTPException(status_code=500, detail="Failed to cancel job")
 
 
-@app.post("/train/create", response_model=TrainResponse)
-async def create_upload_job() -> TrainResponse:
-    """Create a new upload job.
-    
-    Returns:
-        TrainResponse with job_id and UPLOADING status
-    """
-    job_id = job_manager.create_upload_job()
-    
-    return TrainResponse(
-        job_id=job_id,
-        status=JobStatus.UPLOADING,
-        message="Upload job created successfully",
-    )
-
-
-@app.post("/train/{job_id}/ply")
+@app.post("/jobs/{job_id}/ply")
 async def upload_ply(job_id: str, ply_file: UploadFile = File(..., description="PLY file")) -> JSONResponse:
     """Upload PLY file to a job.
     
@@ -427,11 +311,14 @@ async def upload_ply(job_id: str, ply_file: UploadFile = File(..., description="
     Returns:
         JSON response with upload status
     """
+    logger.info(f"POST /jobs/{job_id}/ply - PLY upload requested")
     job = job_manager.get_job(job_id)
     if job is None:
+        logger.error(f"POST /jobs/{job_id}/ply - Job not found: {job_id}")
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     
     if job.status != JobStatus.UPLOADING:
+        logger.warning(f"POST /jobs/{job_id}/ply - Job not in UPLOADING state (current: {job.status})")
         raise HTTPException(
             status_code=400,
             detail=f"Job {job_id} is not in UPLOADING state (current: {job.status})",
@@ -439,6 +326,7 @@ async def upload_ply(job_id: str, ply_file: UploadFile = File(..., description="
     
     job_dir = job_manager.get_job_dir(job_id)
     if job_dir is None:
+        logger.error(f"POST /jobs/{job_id}/ply - Job directory not found")
         raise HTTPException(status_code=500, detail="Job directory not found")
     
     # Save PLY file temporarily
@@ -450,7 +338,12 @@ async def upload_ply(job_id: str, ply_file: UploadFile = File(..., description="
     try:
         success = job_manager.upload_ply(job_id, tmp_path)
         if not success:
+            logger.error(f"POST /jobs/{job_id}/ply - Failed to upload PLY file")
             raise HTTPException(status_code=500, detail="Failed to upload PLY file")
+        
+        # Refresh job to get updated status
+        job = job_manager.get_job(job_id)
+        logger.info(f"POST /jobs/{job_id}/ply - PLY file uploaded successfully")
         
         return JSONResponse(
             content={
@@ -466,71 +359,98 @@ async def upload_ply(job_id: str, ply_file: UploadFile = File(..., description="
             tmp_path.unlink()
 
 
-@app.post("/train/{job_id}/image")
-async def upload_image(job_id: str, image: UploadFile = File(..., description="Image file")) -> JSONResponse:
-    """Upload a single image file to a job.
+@app.post("/jobs/{job_id}/images")
+async def upload_images(job_id: str, images: List[UploadFile] = File(..., description="Image files")) -> JSONResponse:
+    """Upload one or more image files to a job.
     
     Args:
         job_id: Job identifier
-        image: Image file upload
+        images: List of image file uploads
         
     Returns:
         JSON response with upload status
     """
+    logger.info(f"POST /jobs/{job_id}/images - Image upload requested ({len(images)} images)")
     job = job_manager.get_job(job_id)
     if job is None:
+        logger.error(f"POST /jobs/{job_id}/images - Job not found: {job_id}")
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     
     if job.status != JobStatus.UPLOADING:
+        logger.warning(f"POST /jobs/{job_id}/images - Job not in UPLOADING state (current: {job.status})")
         raise HTTPException(
             status_code=400,
             detail=f"Job {job_id} is not in UPLOADING state (current: {job.status})",
         )
     
-    if not image.filename:
-        raise HTTPException(status_code=400, detail="Image filename is required")
-    
-    # Check for duplicates
-    if image.filename in job.images_uploaded:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Image {image.filename} already uploaded",
-        )
-    
     job_dir = job_manager.get_job_dir(job_id)
     if job_dir is None:
+        logger.error(f"POST /jobs/{job_id}/images - Job directory not found")
         raise HTTPException(status_code=500, detail="Job directory not found")
     
-    # Save image file temporarily
-    ext = Path(image.filename).suffix
-    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
-        content = await image.read()
-        tmp_file.write(content)
-        tmp_path = Path(tmp_file.name)
+    uploaded_images = []
+    failed_images = []
     
-    try:
-        success = job_manager.upload_image(job_id, image.filename, tmp_path)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to upload image")
+    # Process each image
+    for image in images:
+        if not image.filename:
+            logger.warning(f"POST /jobs/{job_id}/images - Skipping image without filename")
+            continue
         
-        # Refresh job to get updated images list
-        job = job_manager.get_job(job_id)
+        # Check for duplicates
+        if image.filename in job.images_uploaded:
+            logger.warning(f"POST /jobs/{job_id}/images - Image {image.filename} already uploaded")
+            failed_images.append(f"{image.filename} (already uploaded)")
+            continue
         
-        return JSONResponse(
-            content={
-                "job_id": job_id,
-                "status": job.status,
-                "images_uploaded": job.images_uploaded.copy(),
-            },
-            status_code=200,
+        # Save image file temporarily
+        ext = Path(image.filename).suffix
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
+            content = await image.read()
+            tmp_file.write(content)
+            tmp_path = Path(tmp_file.name)
+        
+        try:
+            success = job_manager.upload_image(job_id, image.filename, tmp_path)
+            if success:
+                uploaded_images.append(image.filename)
+            else:
+                failed_images.append(f"{image.filename} (upload failed)")
+        finally:
+            # Clean up temp file
+            if tmp_path.exists():
+                tmp_path.unlink()
+    
+    if failed_images and not uploaded_images:
+        # All uploads failed
+        logger.error(f"POST /jobs/{job_id}/images - All image uploads failed")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to upload images: {', '.join(failed_images)}",
         )
-    finally:
-        # Clean up temp file
-        if tmp_path.exists():
-            tmp_path.unlink()
+    
+    # Refresh job to get updated images list
+    job = job_manager.get_job(job_id)
+    
+    response_content = {
+        "job_id": job_id,
+        "status": job.status,
+        "images_uploaded": job.images_uploaded.copy(),
+    }
+    
+    if failed_images:
+        response_content["failed_images"] = failed_images
+        logger.warning(f"POST /jobs/{job_id}/images - Some images failed to upload: {failed_images}")
+    
+    logger.info(f"POST /jobs/{job_id}/images - Uploaded {len(uploaded_images)} image(s) successfully")
+    
+    return JSONResponse(
+        content=response_content,
+        status_code=200,
+    )
 
 
-@app.post("/train/{job_id}/cameras")
+@app.post("/jobs/{job_id}/cameras")
 async def upload_cameras(job_id: str, cameras_json: UploadFile = File(..., description="Camera JSON file")) -> JSONResponse:
     """Upload camera.json file to a job.
     
@@ -539,13 +459,16 @@ async def upload_cameras(job_id: str, cameras_json: UploadFile = File(..., descr
         cameras_json: Camera JSON file upload
         
     Returns:
-        JSON response with upload status (validation must be done manually via /validate endpoint)
+        JSON response with upload status
     """
+    logger.info(f"POST /jobs/{job_id}/cameras - Camera JSON upload requested")
     job = job_manager.get_job(job_id)
     if job is None:
+        logger.error(f"POST /jobs/{job_id}/cameras - Job not found: {job_id}")
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     
     if job.status != JobStatus.UPLOADING:
+        logger.warning(f"POST /jobs/{job_id}/cameras - Job not in UPLOADING state (current: {job.status})")
         raise HTTPException(
             status_code=400,
             detail=f"Job {job_id} is not in UPLOADING state (current: {job.status})",
@@ -553,6 +476,7 @@ async def upload_cameras(job_id: str, cameras_json: UploadFile = File(..., descr
     
     job_dir = job_manager.get_job_dir(job_id)
     if job_dir is None:
+        logger.error(f"POST /jobs/{job_id}/cameras - Job directory not found")
         raise HTTPException(status_code=500, detail="Job directory not found")
     
     # Save camera JSON file temporarily
@@ -564,10 +488,12 @@ async def upload_cameras(job_id: str, cameras_json: UploadFile = File(..., descr
     try:
         success = job_manager.upload_cameras(job_id, tmp_path)
         if not success:
+            logger.error(f"POST /jobs/{job_id}/cameras - Invalid camera JSON format")
             raise HTTPException(status_code=400, detail="Invalid camera JSON format")
         
         # Refresh job to get updated status
         job = job_manager.get_job(job_id)
+        logger.info(f"POST /jobs/{job_id}/cameras - Camera JSON uploaded successfully")
         
         return JSONResponse(
             content={
@@ -583,7 +509,7 @@ async def upload_cameras(job_id: str, cameras_json: UploadFile = File(..., descr
             tmp_path.unlink()
 
 
-@app.post("/train/{job_id}/config")
+@app.post("/jobs/{job_id}/config")
 async def upload_config(job_id: str, config_json: str = Form(..., description="Training configuration as JSON")) -> JSONResponse:
     """Upload training configuration to a job.
     
@@ -594,11 +520,14 @@ async def upload_config(job_id: str, config_json: str = Form(..., description="T
     Returns:
         JSON response with upload status
     """
+    logger.info(f"POST /jobs/{job_id}/config - Config upload requested")
     job = job_manager.get_job(job_id)
     if job is None:
+        logger.error(f"POST /jobs/{job_id}/config - Job not found: {job_id}")
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     
     if job.status != JobStatus.UPLOADING:
+        logger.warning(f"POST /jobs/{job_id}/config - Job not in UPLOADING state (current: {job.status})")
         raise HTTPException(
             status_code=400,
             detail=f"Job {job_id} is not in UPLOADING state (current: {job.status})",
@@ -609,6 +538,7 @@ async def upload_config(job_id: str, config_json: str = Form(..., description="T
         config_dict = json.loads(config_json)
         training_config = TrainingConfig(**config_dict)
     except Exception as e:
+        logger.error(f"POST /jobs/{job_id}/config - Invalid training config JSON: {str(e)}")
         raise HTTPException(
             status_code=400,
             detail=f"Invalid training config JSON: {str(e)}",
@@ -616,9 +546,11 @@ async def upload_config(job_id: str, config_json: str = Form(..., description="T
     
     success = job_manager.upload_config(job_id, training_config)
     if not success:
+        logger.error(f"POST /jobs/{job_id}/config - Failed to upload config")
         raise HTTPException(status_code=500, detail="Failed to upload config")
     
     job = job_manager.get_job(job_id)
+    logger.info(f"POST /jobs/{job_id}/config - Config uploaded successfully")
     
     return JSONResponse(
         content={
@@ -630,61 +562,11 @@ async def upload_config(job_id: str, config_json: str = Form(..., description="T
     )
 
 
-@app.get("/train/{job_id}/upload-status", response_model=UploadStatusResponse)
-async def get_upload_status(job_id: str) -> UploadStatusResponse:
-    """Get upload status for a job.
-    
-    Args:
-        job_id: Job identifier
-        
-    Returns:
-        UploadStatusResponse with upload progress and last validation status
-    """
-    status_dict = job_manager.get_upload_status(job_id)
-    if status_dict is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    
-    return UploadStatusResponse(**status_dict)
-
-
-@app.post("/train/{job_id}/validate", response_model=ValidateResponse)
-async def validate_job(job_id: str) -> ValidateResponse:
-    """Manually validate a job to check if it's ready to start training.
-    
-    Args:
-        job_id: Job identifier
-        
-    Returns:
-        ValidateResponse with validation results and updated status
-    """
-    job = job_manager.get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    
-    # Only allow validation for jobs in UPLOADING or READY state
-    if job.status not in [JobStatus.UPLOADING, JobStatus.READY]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Job {job_id} cannot be validated in current state (current: {job.status})",
-        )
-    
-    # Run validation
-    is_ready, errors = job_manager.validate_job_ready(job_id)
-    
-    # Refresh job to get updated status
-    job = job_manager.get_job(job_id)
-    
-    return ValidateResponse(
-        job_id=job_id,
-        status=job.status,
-        is_ready=is_ready,
-        validation_errors=errors,
-    )
-
-
-@app.post("/train/{job_id}/start", response_model=TrainResponse)
+@app.post("/jobs/{job_id}/start", response_model=TrainResponse)
 async def start_training_from_upload(job_id: str) -> TrainResponse:
     """Start training from an uploaded job.
+    
+    Automatically validates the job before starting. If validation fails, returns error details.
     
     Args:
         job_id: Job identifier
@@ -692,21 +574,26 @@ async def start_training_from_upload(job_id: str) -> TrainResponse:
     Returns:
         TrainResponse with job_id and PENDING status
     """
+    logger.info(f"POST /jobs/{job_id}/start - Start training requested")
     job = job_manager.get_job(job_id)
     if job is None:
+        logger.error(f"POST /jobs/{job_id}/start - Job not found: {job_id}")
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     
     # Check concurrent job limit
     active_count = job_manager.get_active_jobs_count()
     if active_count >= MAX_CONCURRENT_JOBS:
+        logger.warning(f"POST /jobs/{job_id}/start - Maximum concurrent jobs ({MAX_CONCURRENT_JOBS}) reached")
         raise HTTPException(
             status_code=503,
             detail=f"Maximum concurrent jobs ({MAX_CONCURRENT_JOBS}) reached. Please wait for a job to complete.",
         )
     
-    # Validate and start
+    # Validate and start (auto-validation)
+    logger.debug(f"POST /jobs/{job_id}/start - Validating job before starting")
     is_ready, errors = job_manager.validate_job_ready(job_id)
     if not is_ready:
+        logger.warning(f"POST /jobs/{job_id}/start - Job validation failed: {errors}")
         raise HTTPException(
             status_code=400,
             detail=f"Job {job_id} is not ready to start. Errors: {errors}",
@@ -714,6 +601,7 @@ async def start_training_from_upload(job_id: str) -> TrainResponse:
     
     success = job_manager.start_training_from_upload(job_id)
     if not success:
+        logger.error(f"POST /jobs/{job_id}/start - Failed to start training")
         raise HTTPException(
             status_code=400,
             detail=f"Job {job_id} cannot be started (status: {job.status})",
@@ -721,6 +609,7 @@ async def start_training_from_upload(job_id: str) -> TrainResponse:
     
     job_dir = job_manager.get_job_dir(job_id)
     if job_dir is None:
+        logger.error(f"POST /jobs/{job_id}/start - Job directory not found")
         raise HTTPException(status_code=500, detail="Job directory not found")
     
     # Get paths
@@ -753,40 +642,11 @@ async def start_training_from_upload(job_id: str) -> TrainResponse:
     
     task.add_done_callback(lambda _: cleanup_task(job_id))
     
+    logger.info(f"POST /jobs/{job_id}/start - Training started successfully")
     return TrainResponse(
         job_id=job_id,
         status=JobStatus.PENDING,
         message="Training started successfully",
-    )
-
-
-@app.delete("/train/{job_id}/upload")
-async def cancel_upload(job_id: str) -> JSONResponse:
-    """Cancel an incomplete upload job.
-    
-    Args:
-        job_id: Job identifier
-        
-    Returns:
-        JSON response with cancellation status
-    """
-    job = job_manager.get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    
-    if job.status not in [JobStatus.UPLOADING, JobStatus.READY]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Job {job_id} cannot be cancelled (status: {job.status})",
-        )
-    
-    success = job_manager.cleanup_upload(job_id)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to cancel upload")
-    
-    return JSONResponse(
-        content={"message": f"Upload {job_id} cancelled successfully"},
-        status_code=200,
     )
 
 
