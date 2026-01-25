@@ -9,12 +9,12 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Default paths
 PLY_PATH="${SCRIPT_DIR}/examples/villa/point_cloud_6999.ply"
-CAMERAS_JSON="${SCRIPT_DIR}/examples/villa/cameras.json"
+CAMERAS_DIR="${SCRIPT_DIR}/examples/villa/cameras"
 DATA_DIR="${PROJECT_ROOT}/examples/data/villa"
 RESULT_DIR="${SCRIPT_DIR}/examples/results/villa"
 
 # Calculate training steps: 10 steps per image
-NUM_IMAGES=$(python3 -c "import json; print(len(json.load(open('$CAMERAS_JSON'))))")
+NUM_IMAGES=$(python3 -c "import glob, os; print(len(glob.glob(os.path.join('$CAMERAS_DIR', '*.cam.json'))))")
 STEPS_PER_IMAGE=10
 MAX_STEPS=$((NUM_IMAGES * STEPS_PER_IMAGE))
 
@@ -24,8 +24,8 @@ if [ ! -f "$PLY_PATH" ]; then
     exit 1
 fi
 
-if [ ! -f "$CAMERAS_JSON" ]; then
-    echo "Error: Cameras JSON file not found: $CAMERAS_JSON"
+if [ ! -d "$CAMERAS_DIR" ]; then
+    echo "Error: Cameras directory not found: $CAMERAS_DIR"
     exit 1
 fi
 
@@ -39,7 +39,7 @@ echo "=========================================="
 echo "Training Villa Dataset from PLY"
 echo "=========================================="
 echo "PLY file:        $PLY_PATH"
-echo "Cameras JSON:    $CAMERAS_JSON"
+echo "Cameras directory: $CAMERAS_DIR"
 echo "Data directory:  $DATA_DIR"
 echo "Result directory: $RESULT_DIR"
 echo "Number of images: $NUM_IMAGES"
@@ -59,7 +59,7 @@ cd "$PROJECT_ROOT"
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 ./train_villa_from_ply.sh
 python server/train_from_ply.py default \
     --ply-path "$PLY_PATH" \
-    --camera-json "$CAMERAS_JSON" \
+    --camera-dir "$CAMERAS_DIR" \
     --data-dir "$DATA_DIR" \
     --result-dir "$RESULT_DIR" \
     --max-steps "$MAX_STEPS" \

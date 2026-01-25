@@ -1,5 +1,6 @@
 """Parser for JSON camera data and dataset class."""
 
+import glob
 import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,19 +14,32 @@ from torch.utils.data import Dataset
 class CameraParser:
     """Parser for JSON camera data."""
     
-    def __init__(self, data_dir: str, camera_json: str, normalize: bool = False):
+    def __init__(self, data_dir: str, camera_dir: str, normalize: bool = False):
         """Initialize camera parser.
         
         Args:
             data_dir: Directory containing images
-            camera_json: Path to JSON file with camera data
+            camera_dir: Directory containing .cam.json files with camera data
             normalize: Whether to normalize the world space
         """
         self.data_dir = data_dir
         
-        # Load JSON camera data
-        with open(camera_json, "r") as f:
-            camera_data = json.load(f)
+        # Check if camera directory exists
+        if not os.path.isdir(camera_dir):
+            raise ValueError(f"Camera directory {camera_dir} does not exist.")
+        
+        # Load all .cam.json files from the directory
+        camera_files = glob.glob(os.path.join(camera_dir, "*.cam.json"))
+        if not camera_files:
+            raise ValueError(f"No .cam.json files found in {camera_dir}")
+        
+        # Load and merge all camera data
+        camera_data = {}
+        for camera_file in sorted(camera_files):
+            with open(camera_file, "r") as f:
+                file_data = json.load(f)
+                # Each file contains one camera entry: {"IMAGE_NAME.JPG": {...}}
+                camera_data.update(file_data)
         
         # Extract image names, camera matrices, and intrinsics
         self.image_names = []

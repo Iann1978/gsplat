@@ -49,7 +49,7 @@ from server.ply_loader import load_ply
 class Config:
     # PLY and camera data paths
     ply_path: str = ""  # Path to PLY file
-    camera_json: str = ""  # Path to JSON file with camera data
+    camera_dir: str = ""  # Directory containing .cam.json files with camera data
     data_dir: str = ""  # Directory containing images
     
     # Disable viewer
@@ -322,8 +322,8 @@ class PLYRunner:
         # Validate required paths
         if not cfg.ply_path:
             raise ValueError("ply_path must be specified")
-        if not cfg.camera_json:
-            raise ValueError("camera_json must be specified")
+        if not cfg.camera_dir:
+            raise ValueError("camera_dir must be specified")
         if not cfg.data_dir:
             raise ValueError("data_dir must be specified")
 
@@ -346,7 +346,7 @@ class PLYRunner:
         # Load camera data
         self.parser = CameraParser(
             data_dir=cfg.data_dir,
-            camera_json=cfg.camera_json,
+            camera_dir=cfg.camera_dir,
             normalize=cfg.normalize_world_space,
         )
         self.trainset = CameraDataset(
@@ -913,10 +913,10 @@ if __name__ == "__main__":
     
     ```bash
     # Single GPU training
-    python server/train_from_ply.py --ply_path <path> --camera_json <path> --data_dir <path>
+    python server/train_from_ply.py --ply_path <path> --camera_dir <path> --data_dir <path>
     
     # Distributed training on 4 GPUs
-    CUDA_VISIBLE_DEVICES=0,1,2,3 python server/train_from_ply.py --ply_path <path> --camera_json <path> --data_dir <path> --steps_scaler 0.25
+    CUDA_VISIBLE_DEVICES=0,1,2,3 python server/train_from_ply.py --ply_path <path> --camera_dir <path> --data_dir <path> --steps_scaler 0.25
     ```
     """
 
