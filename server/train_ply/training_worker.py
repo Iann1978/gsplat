@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 import torch
+import tqdm
 
 # Add parent directory to path for imports
 _script_dir = Path(__file__).parent
@@ -22,6 +23,108 @@ from gsplat.strategy import DefaultStrategy, MCMCStrategy
 
 from .job_manager import JobManager
 from .models import JobStatus, TrainingConfig
+
+
+class ProgressTrackingIterator:
+    """Iterator wrapper that tracks progress and updates job status."""
+    
+    def __init__(self, iterable, job_id: str, job_manager: JobManager, 
+                 max_steps: int, update_interval: int):
+        """Initialize the iterator wrapper.
+        
+        Args:
+            iterable: The iterable to wrap (e.g., range object)
+            job_id: Job identifier
+            job_manager: JobManager instance
+            max_steps: Total training steps
+            update_interval: Steps between progress updates
+        """
+        self._iterable = iter(iterable)
+        self._job_id = job_id
+        self._job_manager = job_manager
+        self._max_steps = max_steps
+        self._update_interval = update_interval
+        self._last_update_step = -1
+    
+    def __iter__(self):
+        """Return self as the iterator."""
+        return self
+    
+    def __next__(self):
+        """Get next value and update progress if needed."""
+        value = next(self._iterable)
+        
+        # The value from the range iterator is the step number
+        # For range(init_step, max_steps), value is the current step
+        current_step = value
+        
+        # Check if this is the last step (or close to it)
+        is_last_step = (current_step >= self._max_steps - 1)
+        
+        # Update job status if interval reached, this is the first step, or last step
+        if (self._last_update_step < 0) or (current_step - self._last_update_step >= self._update_interval) or is_last_step:
+            self._last_update_step = current_step
+            self._update_job_progress(current_step)
+        
+        return value
+    
+    def _update_job_progress(self, step: int):
+        """Update job progress status.
+        
+        Args:
+            step: Current training step
+        """
+        try:
+            if self._max_steps > 0:
+                job_obj = self._job_manager._get_job_object(self._job_id)
+                if job_obj:
+                    job_obj.update_status(
+                        JobStatus.RUNNING, 
+                        current_step=step, 
+                        max_steps=self._max_steps
+                    )
+        except Exception:
+            # Silently ignore errors to prevent training failures
+            # Progress updates are non-critical
+            pass
+
+
+class ProgressTrackingTqdm:
+    """Wrapper around tqdm.tqdm that updates job progress periodically."""
+    
+    def __init__(self, original_tqdm_class, job_id: str, job_manager: JobManager, max_steps: int):
+        """Initialize the wrapper.
+        
+        Args:
+            original_tqdm_class: The original tqdm.tqdm class to wrap
+            job_id: Job identifier
+            job_manager: JobManager instance
+            max_steps: Total training steps
+        """
+        self._original_tqdm = original_tqdm_class
+        self._job_id = job_id
+        self._job_manager = job_manager
+        self._max_steps = max_steps
+        # Calculate update interval: every 50 steps or 1% of max_steps, whichever is smaller
+        self._update_interval = min(50, max(1, max_steps // 100))
+    
+    def __call__(self, *args, **kwargs):
+        """Create a tqdm instance with progress tracking."""
+        # Wrap the first argument (iterable) with progress tracking
+        if args:
+            iterable = args[0]
+            wrapped_iterable = ProgressTrackingIterator(
+                iterable,
+                self._job_id,
+                self._job_manager,
+                self._max_steps,
+                self._update_interval
+            )
+            # Replace first argument with wrapped iterable
+            args = (wrapped_iterable,) + args[1:]
+        
+        # Create tqdm instance with wrapped iterable
+        return self._original_tqdm(*args, **kwargs)
 
 
 async def run_training_job(
@@ -142,7 +245,19 @@ def _run_training_sync(
         sys.stdout = log_fd
         sys.stderr = log_fd
         
+        # Save original tqdm.tqdm and patch it with progress tracking wrapper
+        original_tqdm = tqdm.tqdm
+        progress_tracker = ProgressTrackingTqdm(
+            original_tqdm_class=original_tqdm,
+            job_id=job_id,
+            job_manager=job_manager,
+            max_steps=cfg.max_steps
+        )
+        
         try:
+            # Patch tqdm.tqdm with the wrapper
+            tqdm.tqdm = progress_tracker
+            
             # Create runner and train
             # Use single GPU (rank 0)
             runner = PLYRunner(
@@ -172,6 +287,9 @@ def _run_training_sync(
             runner.train()
             
         finally:
+            # Restore original tqdm.tqdm
+            tqdm.tqdm = original_tqdm
+            
             # Restore stdout/stderr
             sys.stdout = original_stdout
             sys.stderr = original_stderr
