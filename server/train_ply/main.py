@@ -667,6 +667,7 @@ async def start_training_from_upload(job_id: str) -> TrainResponse:
     # Get training config
     job = job_manager.get_job(job_id)
     training_config = job.config if job else None
+    training_config.normalize_world_space = True
     
     # Start training task
     task = asyncio.create_task(
